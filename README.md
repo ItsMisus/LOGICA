@@ -77,7 +77,8 @@ SELECT_DIR → SCANNING → ANALYZING → PREVIEW → APPLYING → RESULT
 1. **SCANNING** — `walkdir` ricorsivo, salta `.git`, `node_modules`, `__pycache__`, cartelle
    nascoste e di sistema. Progresso via evento `scan-progress`. Timeout 5 minuti.
 2. **ANALYZING** — statistiche + campione di 100 file → prompt → Ollama (`/api/generate`,
-   `format: json`) o Claude (`/v1/messages`). Timeout 30 s. Se la risposta non è JSON valido o
+   `format: json`) o Claude (`/v1/messages`). Timeout 180 s: alla prima richiesta Ollama carica
+   il modello in VRAM e ci mette decine di secondi. Se la risposta non è JSON valido o
    l'AI non risponde, si usa lo **schema di fallback** per estensione.
 3. **PREVIEW** — albero cartelle (rinomina con doppio click, unione con drag & drop, eliminazione)
    + tabella dei primi 50 file, statistiche, conflitti e avvisi. Ogni modifica ricalcola il piano.

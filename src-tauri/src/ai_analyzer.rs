@@ -3,8 +3,10 @@
 //! schema deterministico per categoria di estensione: l'app non si blocca mai.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::time::Duration;
 
+use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::scanner::FileInfo;
@@ -12,14 +14,115 @@ use crate::scanner::FileInfo;
 const OLLAMA_URL: &str = "http://localhost:11434";
 const CLAUDE_URL: &str = "https://api.anthropic.com/v1/messages";
 const CLAUDE_MODEL: &str = "claude-opus-5";
-const AI_TIMEOUT: Duration = Duration::from_secs(30);
+/// Generoso di proposito: alla prima richiesta Ollama deve caricare il
+/// modello in VRAM (per un 7B sono decine di secondi), e con 30 s si
+/// finiva sempre nel fallback proprio alla prima analisi.
+const AI_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_SAMPLES: usize = 100;
 /// Profondita' massima consentita nello schema: evita alberi assurdi.
 const MAX_SCHEMA_DEPTH: usize = 4;
 
 /// Albero di cartelle annidate: { "Documenti": { "PDF": {} } }
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SchemaNode(pub BTreeMap<String, SchemaNode>);
+
+/// Un elemento dentro una lista di cartelle: o il nome nudo, o un sottoalbero.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SchemaEntry {
+    Name(String),
+    Node(SchemaNode),
+}
+
+/// I modelli piccoli scrivono lo schema in forme diverse da quella chiesta:
+/// `[]` o `null` per una foglia, `["PDF", "Word"]` o `[{"PDF": {}}]` per un
+/// ramo, `"PDF"` per un figlio unico. Le accettiamo tutte invece di cadere sul
+/// fallback per un dettaglio di sintassi.
+impl<'de> Deserialize<'de> for SchemaNode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SchemaNodeVisitor;
+
+        impl<'de> Visitor<'de> for SchemaNodeVisitor {
+            type Value = SchemaNode;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("un albero di cartelle: oggetto, lista di nomi, stringa o null")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<SchemaNode, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut out = BTreeMap::new();
+                while let Some((key, value)) = access.next_entry::<String, SchemaNode>()? {
+                    let key = key.trim().to_string();
+                    if !key.is_empty() {
+                        out.insert(key, value);
+                    }
+                }
+                Ok(SchemaNode(out))
+            }
+
+            fn visit_seq<S>(self, mut access: S) -> Result<SchemaNode, S::Error>
+            where
+                S: SeqAccess<'de>,
+            {
+                let mut out = BTreeMap::new();
+                while let Some(entry) = access.next_element::<SchemaEntry>()? {
+                    match entry {
+                        SchemaEntry::Name(name) => {
+                            let name = name.trim().to_string();
+                            if !name.is_empty() {
+                                out.entry(name).or_default();
+                            }
+                        }
+                        // Una lista di sottoalberi: si fondono in un unico livello.
+                        SchemaEntry::Node(node) => out.extend(node.0),
+                    }
+                }
+                Ok(SchemaNode(out))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<SchemaNode, E>
+            where
+                E: de::Error,
+            {
+                let mut out = BTreeMap::new();
+                let name = value.trim();
+                if !name.is_empty() {
+                    out.insert(name.to_string(), SchemaNode::default());
+                }
+                Ok(SchemaNode(out))
+            }
+
+            fn visit_unit<E>(self) -> Result<SchemaNode, E>
+            where
+                E: de::Error,
+            {
+                Ok(SchemaNode::default())
+            }
+
+            fn visit_none<E>(self) -> Result<SchemaNode, E>
+            where
+                E: de::Error,
+            {
+                Ok(SchemaNode::default())
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<SchemaNode, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                deserializer.deserialize_any(SchemaNodeVisitor)
+            }
+        }
+
+        deserializer.deserialize_any(SchemaNodeVisitor)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
@@ -467,5 +570,65 @@ mod tests {
         assert_eq!(sanitize_destination("../../etc"), Some("etc".to_string()));
         assert_eq!(sanitize_destination("C:/Windows"), Some("C/Windows".to_string()));
         assert_eq!(sanitize_destination("   "), None);
+    }
+
+    /// Elenco ordinato dei percorsi foglia-per-foglia, per confronti compatti.
+    fn paths(node: &SchemaNode, prefix: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for (name, child) in &node.0 {
+            let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            if child.0.is_empty() {
+                out.push(path);
+            } else {
+                out.extend(paths(child, &path));
+            }
+        }
+        out
+    }
+
+    fn parse(json: &str) -> SchemaNode {
+        serde_json::from_str::<SchemaNode>(json).expect("schema rifiutato")
+    }
+
+    #[test]
+    fn schema_accepts_nested_objects() {
+        let node = parse(r#"{"Documenti": {"PDF": {}}, "Immagini": {}}"#);
+        assert_eq!(paths(&node, ""), vec!["Documenti/PDF", "Immagini"]);
+    }
+
+    #[test]
+    fn schema_accepts_lists_and_nulls_as_leaves() {
+        // Forme che i modelli piccoli producono al posto di {}.
+        let node = parse(r#"{"Documenti": ["PDF", "Word"], "Immagini": [], "Audio": null}"#);
+        assert_eq!(
+            paths(&node, ""),
+            vec!["Audio", "Documenti/PDF", "Documenti/Word", "Immagini"]
+        );
+    }
+
+    #[test]
+    fn schema_accepts_list_of_subtrees_and_bare_strings() {
+        let node = parse(r#"{"Media": [{"Audio": {}}, {"Video": ["MP4"]}], "Note": "Testi"}"#);
+        assert_eq!(paths(&node, ""), vec!["Media/Audio", "Media/Video/MP4", "Note/Testi"]);
+    }
+
+    #[test]
+    fn schema_drops_empty_names() {
+        let node = parse(r#"{"  ": {}, "Documenti": ["", "  ", "PDF"]}"#);
+        assert_eq!(paths(&node, ""), vec!["Documenti/PDF"]);
+    }
+
+    #[test]
+    fn proposal_with_list_schema_is_not_rejected() {
+        let raw = r#"{
+            "schema": {"Documenti": ["PDF"], "Immagini": []},
+            "rules": [{"pattern": "*.pdf", "destination": "Documenti/PDF"}],
+            "rationale": "prova"
+        }"#;
+        let parsed: RawProposal = serde_json::from_str(raw).expect("proposta rifiutata");
+        let proposal = validate(parsed, "ollama").expect("validazione fallita");
+        assert_eq!(proposal.source, "ollama");
+        assert_eq!(proposal.rules.len(), 1);
+        assert!(paths(&proposal.schema, "").contains(&"Documenti/PDF".to_string()));
     }
 }
