@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ai_analyzer::{sanitize_destination, OrganizationProposal};
+use crate::ai_analyzer::{self, sanitize_destination, Grouping, OrganizationProposal};
 use crate::scanner::FileInfo;
 
 /// Limite storico di Windows: oltre questo un path puo' non essere apribile.
@@ -83,16 +83,20 @@ pub fn create_mapping_plan(
     for file in files {
         let name_lower = file.name.to_lowercase();
 
-        // Prima regola che matcha vince: l'ordine dell'AI e' significativo.
-        let folder = proposal
-            .rules
-            .iter()
-            .find(|r| matches_pattern(&r.pattern, &name_lower))
-            .and_then(|r| sanitize_destination(&r.destination))
-            .unwrap_or_else(|| {
-                unmatched += 1;
-                DEFAULT_FOLDER.to_string()
-            });
+        let folder = match proposal.grouping {
+            // Prima regola che matcha vince: l'ordine dell'AI e' significativo.
+            Grouping::Extension => proposal
+                .rules
+                .iter()
+                .find(|r| matches_pattern(&r.pattern, &name_lower))
+                .and_then(|r| sanitize_destination(&r.destination)),
+            // Criteri sui metadati: le regole sul nome non c'entrano.
+            other => ai_analyzer::folder_for_grouping(file, other),
+        }
+        .unwrap_or_else(|| {
+            unmatched += 1;
+            DEFAULT_FOLDER.to_string()
+        });
 
         // Risoluzione conflitti: due file diversi non possono finire sullo stesso path.
         let mut relative = format!("{}/{}", folder, file.name);
@@ -167,6 +171,45 @@ pub fn create_mapping_plan(
     };
 
     MappingPlan { root: root.to_string(), moves, conflicts, warnings, statistics }
+}
+
+/// Riassunto di uno o piu' piani, pensato per il blocco proposta in chat:
+/// numeri aggregati piu' le prime righe della mappatura.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanPreview {
+    pub roots: Vec<String>,
+    pub total_moves: usize,
+    pub new_folders: usize,
+    pub conflicts: usize,
+    pub unmatched: usize,
+    pub warnings: Vec<String>,
+    /// Prime righe della mappatura, per la tabella in chat.
+    pub sample: Vec<Move>,
+}
+
+/// Numero di righe mostrate nel blocco proposta.
+pub const PREVIEW_ROWS: usize = 50;
+
+pub fn summarize(plans: &[MappingPlan]) -> PlanPreview {
+    let mut preview = PlanPreview {
+        roots: plans.iter().map(|p| p.root.clone()).collect(),
+        total_moves: 0,
+        new_folders: 0,
+        conflicts: 0,
+        unmatched: 0,
+        warnings: Vec::new(),
+        sample: Vec::new(),
+    };
+    for plan in plans {
+        preview.total_moves += plan.statistics.total_moves;
+        preview.new_folders += plan.statistics.new_folders;
+        preview.unmatched += plan.statistics.unmatched;
+        preview.conflicts += plan.conflicts.len();
+        preview.warnings.extend(plan.warnings.iter().cloned());
+        let room = PREVIEW_ROWS.saturating_sub(preview.sample.len());
+        preview.sample.extend(plan.moves.iter().take(room).cloned());
+    }
+    preview
 }
 
 #[cfg(test)]

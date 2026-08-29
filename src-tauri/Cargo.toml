@@ -1,7 +1,7 @@
 [package]
 name = "file-organizer-ai"
 version = "0.1.0"
-description = "Organizza cartelle con AI locale (Ollama) o Claude API"
+description = "LOGICA: organizza i file chiacchierando con un AI locale (Ollama) o Claude API"
 edition = "2021"
 rust-version = "1.77"
 

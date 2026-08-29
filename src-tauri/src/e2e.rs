@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{ai_analyzer, file_mapper, file_operations, scanner};
+use crate::{ai_analyzer, ai_conversationalist, file_mapper, file_operations, scanner};
 
 /// File finti che coprono tutte le categorie dello schema di fallback.
 const SAMPLE_FILES: &[&str] = &[
@@ -154,7 +154,7 @@ fn full_cycle_scan_plan_apply_undo() {
     }
 
     // --- undo ---
-    file_operations::undo(&log).expect("undo fallito");
+    assert!(file_operations::undo_logs(&[log]).is_empty(), "undo fallito");
     assert_eq!(relative_files(tree.path()), before, "undo: albero non ripristinato");
     assert!(
         !tree.path().join(file_operations::UNDO_FILE).exists(),
@@ -192,12 +192,19 @@ fn live_ollama_proposal() {
     let files = scanner::scan_directory(tree.as_str(), Vec::new(), |_, _| {}).expect("scansione");
 
     let runtime = tokio::runtime::Runtime::new().expect("runtime tokio");
-    let online = runtime.block_on(ai_analyzer::check_ollama_connection());
+    let online = runtime.block_on(ai_analyzer::check_ollama_connection(
+        ai_analyzer::DEFAULT_OLLAMA_URL,
+    ));
     assert!(online, "Ollama non risponde su localhost:11434");
 
     let model = std::env::var("FOAI_TEST_MODEL").unwrap_or_else(|_| "mistral".to_string());
-    let proposal =
-        runtime.block_on(ai_analyzer::get_organization_proposal(&files, true, &model, None));
+    let proposal = runtime.block_on(ai_analyzer::get_organization_proposal(
+        &files,
+        true,
+        ai_analyzer::DEFAULT_OLLAMA_URL,
+        &model,
+        None,
+    ));
     assert_eq!(proposal.source, "ollama", "risposta non valida: si e' usato il fallback");
     assert!(!proposal.rules.is_empty(), "proposta AI senza regole");
 
@@ -209,5 +216,58 @@ fn live_ollama_proposal() {
             "destinazione AI fuori dalla radice: {}",
             mv.destination
         );
+    }
+}
+
+/// Il percorso conversazionale: "organizza per data" -> proposta -> piani su
+/// due cartelle -> applicazione unica -> undo unico.
+#[test]
+fn conversational_cycle_on_two_folders() {
+    use ai_analyzer::Grouping;
+    use ai_conversationalist::{classify, Intent};
+
+    let first = TempTree::new("chat-a");
+    let second = TempTree::new("chat-b");
+
+    // Senza scansione il criterio da solo non fa partire nulla.
+    assert_eq!(classify("per data", false, false), Intent::Chat);
+    assert_eq!(classify("per data", true, false), Intent::Propose(Grouping::Month));
+
+    let mut plans = Vec::new();
+    let mut before = Vec::new();
+    for tree in [&first, &second] {
+        before.push(relative_files(tree.path()));
+        let files = scanner::scan_directory(tree.as_str(), Vec::new(), |_, _| {}).expect("scansione");
+        let proposal = ai_analyzer::grouping_proposal(&files, Grouping::Month);
+        assert!(proposal.rules.is_empty(), "il criterio per data non usa regole sul nome");
+        let plan = file_mapper::create_mapping_plan(tree.as_str(), &files, &proposal);
+        assert_eq!(plan.moves.len(), files.len(), "ogni file deve avere una destinazione");
+        plans.push(plan);
+    }
+
+    let expected_moves: usize = plans.iter().map(|p| p.moves.len()).sum();
+    let preview = file_mapper::summarize(&plans);
+    assert_eq!(preview.total_moves, expected_moves);
+    assert_eq!(preview.roots.len(), 2);
+    assert!(preview.sample.len() <= file_mapper::PREVIEW_ROWS);
+
+    // --- applicazione delle due cartelle come operazione unica ---
+    let cancel = AtomicBool::new(false);
+    let mut last_total = 0usize;
+    let (result, logs) = file_operations::apply_plans(&plans, &cancel, |_, total, _| last_total = total)
+        .expect("apply_plans fallita");
+    assert_eq!(result.status, "success", "errori: {:?}", result.errors);
+    assert_eq!(result.files_moved, expected_moves);
+    assert_eq!(last_total, expected_moves, "il progresso deve contare tutte le cartelle");
+    assert_eq!(logs.len(), 2);
+
+    for (tree, was) in [&first, &second].iter().zip(&before) {
+        assert_ne!(&relative_files(tree.path()), was, "apply: niente si e' mosso");
+    }
+
+    // --- undo unico ---
+    assert!(file_operations::undo_logs(&logs).is_empty(), "undo con errori");
+    for (tree, was) in [&first, &second].iter().zip(&before) {
+        assert_eq!(&relative_files(tree.path()), was, "undo: albero non ripristinato");
     }
 }

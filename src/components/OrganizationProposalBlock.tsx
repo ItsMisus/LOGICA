@@ -1,15 +1,18 @@
 import { useMemo, useState } from "react";
-import type { MappingPlan, OrganizationProposal, Rule, SchemaNode } from "../types";
+import type { OrganizationProposal, PlanPreview, Rule, SchemaNode } from "../types";
 
 interface Props {
   proposal: OrganizationProposal;
-  plan: MappingPlan | null;
+  preview: PlanPreview | null;
+  /** false quando la proposta e' storica (gia' applicata o annullata). */
+  active: boolean;
+  busy: boolean;
   onProposalChange: (p: OrganizationProposal) => void;
-  onApply: () => void;
-  onBack: () => void;
+  onApprove: () => void;
+  onCancel: () => void;
 }
 
-/* ---------- helpers sullo schema (albero di cartelle, immutabile) ---------- */
+/* ---------- helper sullo schema (albero di cartelle, immutabile) ---------- */
 
 function cloneSchema(node: SchemaNode): SchemaNode {
   return JSON.parse(JSON.stringify(node)) as SchemaNode;
@@ -54,6 +57,7 @@ function rewriteRules(rules: Rule[], oldPrefix: string, newPrefix: string | null
 interface TreeProps {
   node: SchemaNode;
   path: string[];
+  editable: boolean;
   collapsed: Set<string>;
   onToggle: (key: string) => void;
   onRename: (path: string[], name: string) => void;
@@ -61,7 +65,7 @@ interface TreeProps {
   onMove: (from: string[], to: string[]) => void;
 }
 
-function Tree({ node, path, collapsed, onToggle, onRename, onDelete, onMove }: TreeProps) {
+function Tree({ node, path, editable, collapsed, onToggle, onRename, onDelete, onMove }: TreeProps) {
   const [editing, setEditing] = useState<string | null>(null);
   const entries = Object.keys(node).sort((a, b) => a.localeCompare(b, "it"));
 
@@ -77,10 +81,11 @@ function Tree({ node, path, collapsed, onToggle, onRename, onDelete, onMove }: T
           <li key={key}>
             <div
               className="tree-row"
-              draggable
+              draggable={editable}
               onDragStart={(e) => e.dataTransfer.setData("text/plain", key)}
-              onDragOver={(e) => e.preventDefault()}
+              onDragOver={(e) => editable && e.preventDefault()}
               onDrop={(e) => {
+                if (!editable) return;
                 e.preventDefault();
                 e.stopPropagation();
                 const from = e.dataTransfer.getData("text/plain");
@@ -115,25 +120,30 @@ function Tree({ node, path, collapsed, onToggle, onRename, onDelete, onMove }: T
               ) : (
                 <span
                   className="tree-name"
-                  onDoubleClick={() => setEditing(key)}
-                  title="Doppio click per rinominare"
+                  onDoubleClick={() => editable && setEditing(key)}
+                  title={editable ? "Doppio click per rinominare" : undefined}
                 >
                   <span aria-hidden="true">📁</span> {name}
                 </span>
               )}
 
-              <button className="btn ghost tiny" onClick={() => setEditing(key)}>
-                Rinomina
-              </button>
-              <button className="btn ghost tiny danger" onClick={() => onDelete(childPath)}>
-                Elimina
-              </button>
+              {editable && (
+                <span className="tree-actions">
+                  <button className="btn ghost tiny" onClick={() => setEditing(key)}>
+                    Rinomina
+                  </button>
+                  <button className="btn ghost tiny danger" onClick={() => onDelete(childPath)}>
+                    Elimina
+                  </button>
+                </span>
+              )}
             </div>
 
             {hasChildren && !isCollapsed && (
               <Tree
                 node={node[name]}
                 path={childPath}
+                editable={editable}
                 collapsed={collapsed}
                 onToggle={onToggle}
                 onRename={onRename}
@@ -151,15 +161,27 @@ function Tree({ node, path, collapsed, onToggle, onRename, onDelete, onMove }: T
 /* ------------------------------- componente ------------------------------ */
 
 const ROWS_PER_PAGE = 10;
-const MAX_PREVIEW_ROWS = 50;
 
-export default function PreviewPhase({ proposal, plan, onProposalChange, onApply, onBack }: Props) {
+export default function OrganizationProposalBlock({
+  proposal,
+  preview,
+  active,
+  busy,
+  onProposalChange,
+  onApprove,
+  onCancel,
+}: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [editing, setEditing] = useState(false);
   const [page, setPage] = useState(0);
 
-  const rows = useMemo(() => (plan ? plan.moves.slice(0, MAX_PREVIEW_ROWS) : []), [plan]);
+  const rows = useMemo(() => preview?.sample ?? [], [preview]);
   const pageCount = Math.max(1, Math.ceil(rows.length / ROWS_PER_PAGE));
   const visible = rows.slice(page * ROWS_PER_PAGE, page * ROWS_PER_PAGE + ROWS_PER_PAGE);
+
+  // Lo schema si modifica solo quando il criterio e' per tipo: negli altri casi
+  // le cartelle nascono dai metadati dei file, rinominarle non avrebbe effetto.
+  const canEdit = active && proposal.grouping === "extension";
 
   function toggle(key: string) {
     setCollapsed((prev) => {
@@ -177,22 +199,14 @@ export default function PreviewPhase({ proposal, plan, onProposalChange, onApply
     attach(schema, path.slice(0, -1), newName, subtree);
     const oldPrefix = path.join("/");
     const newPrefix = [...path.slice(0, -1), newName].join("/");
-    onProposalChange({
-      ...proposal,
-      schema,
-      rules: rewriteRules(proposal.rules, oldPrefix, newPrefix),
-    });
+    onProposalChange({ ...proposal, schema, rules: rewriteRules(proposal.rules, oldPrefix, newPrefix) });
   }
 
   function remove(path: string[]) {
     const schema = cloneSchema(proposal.schema);
     if (!detach(schema, path)) return;
     // I file che puntavano qui finiscono in "Vari": non si perde mai nulla.
-    onProposalChange({
-      ...proposal,
-      schema,
-      rules: rewriteRules(proposal.rules, path.join("/"), null),
-    });
+    onProposalChange({ ...proposal, schema, rules: rewriteRules(proposal.rules, path.join("/"), null) });
   }
 
   function move(from: string[], to: string[]) {
@@ -205,62 +219,60 @@ export default function PreviewPhase({ proposal, plan, onProposalChange, onApply
     if (!subtree) return;
     const name = from[from.length - 1];
     attach(schema, to, name, subtree);
-    onProposalChange({
-      ...proposal,
-      schema,
-      rules: rewriteRules(proposal.rules, fromKey, [...to, name].join("/")),
-    });
+    onProposalChange({ ...proposal, schema, rules: rewriteRules(proposal.rules, fromKey, [...to, name].join("/")) });
   }
 
   return (
-    <div className="card wide">
-      <div className="row space-between">
-        <h1>Anteprima</h1>
+    <section className={`proposal ${active ? "" : "stale"}`}>
+      <header className="proposal-head">
+        <h2>Schema proposto</h2>
         <span className="badge">motore: {proposal.source}</span>
-      </div>
+        {!active && <span className="badge muted">non piu' attiva</span>}
+      </header>
 
-      {plan && (
+      <p className="rationale">{proposal.rationale}</p>
+
+      {preview && (
         <div className="stats">
           <div className="stat">
-            <strong>{plan.statistics.total_moves.toLocaleString("it-IT")}</strong>
+            <strong>{preview.total_moves.toLocaleString("it-IT")}</strong>
             <span>file da spostare</span>
           </div>
           <div className="stat">
-            <strong>{plan.statistics.new_folders}</strong>
-            <span>cartelle nuove</span>
+            <strong>{preview.new_folders}</strong>
+            <span>cartelle</span>
           </div>
           <div className="stat warn">
-            <strong>{plan.conflicts.length}</strong>
+            <strong>{preview.conflicts}</strong>
             <span>conflitti risolti</span>
           </div>
           <div className="stat">
-            <strong>{plan.statistics.unmatched.toLocaleString("it-IT")}</strong>
+            <strong>{preview.unmatched.toLocaleString("it-IT")}</strong>
             <span>senza regola &rarr; Vari</span>
           </div>
         </div>
       )}
 
-      <p className="rationale">{proposal.rationale}</p>
-
       <div className="split">
-        <section>
-          <h2>Struttura proposta</h2>
-          <p className="hint">
-            Doppio click per rinominare &middot; trascina una cartella dentro un&apos;altra per unirle.
-          </p>
+        <div>
+          <h3>Cartelle</h3>
+          {editing && canEdit && (
+            <p className="hint">Doppio click per rinominare &middot; trascina una cartella dentro un&apos;altra per unirle.</p>
+          )}
           <Tree
             node={proposal.schema}
             path={[]}
+            editable={editing && canEdit}
             collapsed={collapsed}
             onToggle={toggle}
             onRename={rename}
             onDelete={remove}
             onMove={move}
           />
-        </section>
+        </div>
 
-        <section>
-          <h2>Mappatura (primi {MAX_PREVIEW_ROWS} file)</h2>
+        <div>
+          <h3>Dove finiscono i file</h3>
           <div className="table-wrap">
             <table className="table">
               <thead>
@@ -288,43 +300,52 @@ export default function PreviewPhase({ proposal, plan, onProposalChange, onApply
               </tbody>
             </table>
           </div>
-          <div className="row space-between">
-            <button className="btn ghost small" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
-              &larr; Prec
-            </button>
-            <span className="subtitle">
-              {page + 1} / {pageCount}
-            </span>
-            <button
-              className="btn ghost small"
-              disabled={page >= pageCount - 1}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              Succ &rarr;
-            </button>
-          </div>
-        </section>
+          {rows.length > ROWS_PER_PAGE && (
+            <div className="row space-between">
+              <button className="btn ghost small" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
+                &larr; Prec
+              </button>
+              <span className="subtitle">
+                {page + 1} / {pageCount}
+              </span>
+              <button
+                className="btn ghost small"
+                disabled={page >= pageCount - 1}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                Succ &rarr;
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
-      {plan && plan.warnings.length > 0 && (
+      {preview && preview.warnings.length > 0 && (
         <div className="alert warn">
-          <strong>Avvisi ({plan.warnings.length}):</strong>
+          <strong>Avvisi ({preview.warnings.length}):</strong>
           <ul>
-            {plan.warnings.slice(0, 5).map((w) => (
+            {preview.warnings.slice(0, 4).map((w) => (
               <li key={w}>{w}</li>
             ))}
           </ul>
         </div>
       )}
 
-      <div className="row">
-        <button className="btn ghost" onClick={onBack}>
-          Indietro (Esc)
-        </button>
-        <button className="btn primary" disabled={!plan || plan.moves.length === 0} onClick={onApply}>
-          Applica (Invio)
-        </button>
-      </div>
-    </div>
+      {active && (
+        <div className="row">
+          <button className="btn primary" disabled={busy || !preview || preview.total_moves === 0} onClick={onApprove}>
+            {busy ? "Sto spostando..." : "Approva"}
+          </button>
+          {canEdit && (
+            <button className="btn ghost" disabled={busy} onClick={() => setEditing((v) => !v)}>
+              {editing ? "Fine modifiche" : "Modifica"}
+            </button>
+          )}
+          <button className="btn ghost danger" disabled={busy} onClick={onCancel}>
+            Annulla
+          </button>
+        </div>
+      )}
+    </section>
   );
 }

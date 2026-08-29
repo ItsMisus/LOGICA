@@ -156,17 +156,6 @@ where
     Ok((result, log))
 }
 
-/// Ripete le mosse al contrario. Ritorna un messaggio per l'utente.
-pub fn undo(log: &UndoLog) -> Result<String, String> {
-    let errors = rollback(log);
-    let _ = fs::remove_file(Path::new(&log.root).join(UNDO_FILE));
-    if errors.is_empty() {
-        Ok(format!("{} file riportati nella posizione originale.", log.moved.len()))
-    } else {
-        Err(format!("Undo completato con problemi: {}", errors.join("; ")))
-    }
-}
-
 /// Apre la cartella nel file manager di sistema.
 pub fn open_in_explorer(path: &str) -> Result<(), String> {
     let p = Path::new(path);
@@ -184,4 +173,66 @@ pub fn open_in_explorer(path: &str) -> Result<(), String> {
     // explorer.exe ritorna un exit code != 0 anche quando apre la finestra:
     // ci basta sapere che il processo e' partito.
     cmd.map(|_| ()).map_err(|e| format!("Impossibile aprire la cartella: {e}"))
+}
+
+/* ---------------------------- piani multipli ---------------------------- */
+
+/// Applica piu' piani (una cartella radice ciascuno) come se fossero uno solo:
+/// se uno fallisce si annullano anche quelli gia' completati.
+pub fn apply_plans<F>(
+    plans: &[MappingPlan],
+    cancel: &AtomicBool,
+    mut on_progress: F,
+) -> Result<(ApplyResult, Vec<UndoLog>), String>
+where
+    F: FnMut(usize, usize, &str),
+{
+    let total: usize = plans.iter().map(|p| p.moves.len()).sum();
+    let mut logs: Vec<UndoLog> = Vec::new();
+    let mut done = 0usize;
+    let mut files_moved = 0usize;
+    let mut folders_created = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    for plan in plans {
+        let offset = done;
+        match apply_mapping_plan(plan, cancel, |d, _t, current| on_progress(offset + d, total, current)) {
+            Ok((result, log)) => {
+                done += plan.moves.len();
+                files_moved += result.files_moved;
+                folders_created += result.folders_created;
+                errors.extend(result.errors);
+                logs.push(log);
+            }
+            Err(e) => {
+                // Il piano fallito si e' gia' annullato da solo: qui tocca
+                // rimettere a posto le cartelle completate prima.
+                let mut msg = e;
+                let rollback_errors = undo_logs(&logs);
+                if !rollback_errors.is_empty() {
+                    msg.push_str(&format!(" Attenzione: {}", rollback_errors.join("; ")));
+                }
+                return Err(msg);
+            }
+        }
+    }
+
+    let result = ApplyResult {
+        status: if errors.is_empty() { "success".into() } else { "partial".into() },
+        files_moved,
+        folders_created,
+        errors,
+        undo_available: files_moved > 0,
+    };
+    Ok((result, logs))
+}
+
+/// Annulla piu' log, dal piu' recente al piu' vecchio. Ritorna gli errori.
+pub fn undo_logs(logs: &[UndoLog]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for log in logs.iter().rev() {
+        errors.extend(rollback(log));
+        let _ = fs::remove_file(Path::new(&log.root).join(UNDO_FILE));
+    }
+    errors
 }

@@ -6,14 +6,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::time::Duration;
 
+use chrono::{DateTime, Datelike, Utc};
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::scanner::FileInfo;
 
-const OLLAMA_URL: &str = "http://localhost:11434";
-const CLAUDE_URL: &str = "https://api.anthropic.com/v1/messages";
-const CLAUDE_MODEL: &str = "claude-opus-5";
+pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
+pub(crate) const CLAUDE_URL: &str = "https://api.anthropic.com/v1/messages";
+pub(crate) const CLAUDE_MODEL: &str = "claude-opus-5";
 /// Generoso di proposito: alla prima richiesta Ollama deve caricare il
 /// modello in VRAM (per un 7B sono decine di secondi), e con 30 s si
 /// finiva sempre nel fallback proprio alla prima analisi.
@@ -130,6 +131,30 @@ pub struct Rule {
     pub destination: String,
 }
 
+/// Criterio con cui si sceglie la cartella di destinazione.
+///
+/// `Extension` usa le `rules` (pattern sul nome file). Gli altri criteri sono
+/// deterministici e ignorano le regole: la destinazione si ricava dai metadati
+/// del file, cosa che i pattern sul nome non possono esprimere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Grouping {
+    /// Per tipo/estensione: decide `rules`.
+    Extension,
+    /// Per anno di modifica: "2024".
+    Year,
+    /// Per anno e mese: "2024/03 - Marzo".
+    Month,
+    /// Per cartella di provenienza: primo livello del path relativo.
+    SourceFolder,
+}
+
+impl Default for Grouping {
+    fn default() -> Self {
+        Grouping::Extension
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganizationProposal {
     pub schema: SchemaNode,
@@ -137,6 +162,9 @@ pub struct OrganizationProposal {
     pub rationale: String,
     /// "ollama" | "claude" | "fallback"
     pub source: String,
+    /// Criterio di raggruppamento. Le proposte AI non lo indicano: default per tipo.
+    #[serde(default)]
+    pub grouping: Grouping,
 }
 
 /// Forma grezza attesa dall'AI (senza `source`, che aggiungiamo noi).
@@ -257,7 +285,7 @@ Vincoli:
 
 /* --------------------------------- chiamate -------------------------------- */
 
-fn http_client() -> Result<reqwest::Client, String> {
+pub(crate) fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(AI_TIMEOUT)
         .build()
@@ -265,20 +293,20 @@ fn http_client() -> Result<reqwest::Client, String> {
 }
 
 /// True se il demone Ollama risponde su localhost:11434.
-pub async fn check_ollama_connection() -> bool {
+pub async fn check_ollama_connection(url: &str) -> bool {
     let client = match reqwest::Client::builder().timeout(Duration::from_secs(3)).build() {
         Ok(c) => c,
         Err(_) => return false,
     };
     client
-        .get(format!("{OLLAMA_URL}/api/tags"))
+        .get(format!("{}/api/tags", url.trim_end_matches('/')))
         .send()
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
 }
 
-async fn call_ollama(model: &str, prompt: &str) -> Result<String, String> {
+async fn call_ollama(url: &str, model: &str, prompt: &str) -> Result<String, String> {
     #[derive(Deserialize)]
     struct OllamaResponse {
         response: String,
@@ -293,7 +321,7 @@ async fn call_ollama(model: &str, prompt: &str) -> Result<String, String> {
     });
 
     let res = http_client()?
-        .post(format!("{OLLAMA_URL}/api/generate"))
+        .post(format!("{}/api/generate", url.trim_end_matches('/')))
         .json(&body)
         .send()
         .await
@@ -355,7 +383,7 @@ async fn call_claude(prompt: &str) -> Result<String, String> {
 
 /// Estrae il primo oggetto JSON bilanciato dal testo (i modelli spesso
 /// aggiungono spiegazioni o code fence attorno al JSON).
-fn extract_json(text: &str) -> Option<&str> {
+pub(crate) fn extract_json(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let mut depth = 0usize;
     let mut in_string = false;
@@ -462,7 +490,13 @@ fn validate(raw: RawProposal, source: &str) -> Result<OrganizationProposal, Stri
         raw.rationale.trim().to_string()
     };
 
-    Ok(OrganizationProposal { schema, rules, rationale, source: source.to_string() })
+    Ok(OrganizationProposal {
+        schema,
+        rules,
+        rationale,
+        source: source.to_string(),
+        grouping: Grouping::Extension,
+    })
 }
 
 /* -------------------------------- fallback -------------------------------- */
@@ -515,6 +549,7 @@ pub fn fallback_proposal(files: &[FileInfo]) -> OrganizationProposal {
         rules,
         rationale: "Schema di riserva: i file sono raggruppati per tipo di estensione.".to_string(),
         source: "fallback".to_string(),
+        grouping: Grouping::Extension,
     }
 }
 
@@ -525,6 +560,7 @@ pub fn fallback_proposal(files: &[FileInfo]) -> OrganizationProposal {
 pub async fn get_organization_proposal(
     files: &[FileInfo],
     use_ollama: bool,
+    ollama_url: &str,
     model: &str,
     user_preferences: Option<&str>,
 ) -> OrganizationProposal {
@@ -536,7 +572,7 @@ pub async fn get_organization_proposal(
     let source = if use_ollama { "ollama" } else { "claude" };
 
     let raw_text = if use_ollama {
-        call_ollama(model, &prompt).await
+        call_ollama(ollama_url, model, &prompt).await
     } else {
         call_claude(&prompt).await
     };
@@ -555,9 +591,163 @@ pub async fn get_organization_proposal(
     }
 }
 
+/// Parsa e valida una proposta scritta dall'AI dentro un blocco JSON.
+pub fn proposal_from_json(json: &str, source: &str) -> Result<OrganizationProposal, String> {
+    let raw: RawProposal =
+        serde_json::from_str(json).map_err(|e| format!("JSON della proposta non valido: {e}"))?;
+    validate(raw, source)
+}
+
+/* --------------------- proposte deterministiche non-AI --------------------- */
+
+const MESI: [&str; 12] = [
+    "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio", "Agosto",
+    "Settembre", "Ottobre", "Novembre", "Dicembre",
+];
+
+/// Cartella di destinazione per un file, dato il criterio di raggruppamento.
+/// Ritorna `None` per `Extension`, che passa invece dalle `rules`.
+pub fn folder_for_grouping(file: &FileInfo, grouping: Grouping) -> Option<String> {
+    match grouping {
+        Grouping::Extension => None,
+        Grouping::Year | Grouping::Month => {
+            // Se la data non e' leggibile mettiamo il file tra i non datati,
+            // invece di inventare un anno sbagliato.
+            let dt = DateTime::parse_from_rfc3339(&file.modified)
+                .map(|d| d.with_timezone(&Utc))
+                .ok()?;
+            let year = dt.year();
+            if grouping == Grouping::Year {
+                Some(year.to_string())
+            } else {
+                let m = dt.month() as usize;
+                Some(format!("{year}/{:02} - {}", m, MESI[m - 1]))
+            }
+        }
+        Grouping::SourceFolder => {
+            // Primo livello del path relativo: i file gia' in radice non hanno
+            // una cartella di provenienza.
+            let first = file.relative_path.split('/').next().unwrap_or("");
+            let is_file_in_root = first == file.name;
+            if first.is_empty() || is_file_in_root {
+                None
+            } else {
+                sanitize_destination(first)
+            }
+        }
+    }
+}
+
+/// Proposta deterministica per data o per cartella di provenienza: lo schema
+/// nasce dalle cartelle che i file produrranno davvero, non da un indovinello.
+pub fn grouping_proposal(files: &[FileInfo], grouping: Grouping) -> OrganizationProposal {
+    if grouping == Grouping::Extension {
+        return fallback_proposal(files);
+    }
+
+    let mut schema = SchemaNode::default();
+    for f in files {
+        match folder_for_grouping(f, grouping) {
+            Some(dest) => insert_path(&mut schema, &dest),
+            None => insert_path(&mut schema, "Vari"),
+        }
+    }
+    insert_path(&mut schema, "Vari");
+
+    let rationale = match grouping {
+        Grouping::Year => "I file sono raggruppati per anno di ultima modifica.",
+        Grouping::Month => "I file sono raggruppati per anno e mese di ultima modifica.",
+        Grouping::SourceFolder => "I file sono raggruppati per cartella di provenienza.",
+        Grouping::Extension => unreachable!("gestito sopra"),
+    };
+
+    OrganizationProposal {
+        schema,
+        rules: Vec::new(), // il criterio non passa dai pattern sul nome
+        rationale: rationale.to_string(),
+        source: "logica".to_string(),
+        grouping,
+    }
+}
+
+/// Modelli installati su Ollama, per il menu delle impostazioni.
+pub async fn list_ollama_models(url: &str) -> Vec<String> {
+    let client = match reqwest::Client::builder().timeout(Duration::from_secs(5)).build() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let res = match client.get(format!("{}/api/tags", url.trim_end_matches('/'))).send().await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let value: serde_json::Value = match res.json().await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    value["models"]
+        .as_array()
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn file_modified(name: &str, modified: &str, relative: &str) -> FileInfo {
+        FileInfo {
+            name: name.to_string(),
+            path: format!("C:/tmp/{relative}"),
+            extension: name.rsplit('.').next().unwrap_or("").to_string(),
+            size: 10,
+            modified: modified.to_string(),
+            relative_path: relative.to_string(),
+            depth: 1,
+            content_preview: None,
+        }
+    }
+
+    #[test]
+    fn date_grouping_uses_italian_months() {
+        let file = file_modified("nota.txt", "2024-03-07T08:00:00Z", "nota.txt");
+        assert_eq!(folder_for_grouping(&file, Grouping::Month), Some("2024/03 - Marzo".to_string()));
+        assert_eq!(folder_for_grouping(&file, Grouping::Year), Some("2024".to_string()));
+        // Per tipo la destinazione arriva dalle regole, non dai metadati.
+        assert_eq!(folder_for_grouping(&file, Grouping::Extension), None);
+    }
+
+    #[test]
+    fn unreadable_date_and_root_files_fall_back_to_vari() {
+        let broken = file_modified("nota.txt", "non e' una data", "nota.txt");
+        assert_eq!(folder_for_grouping(&broken, Grouping::Month), None);
+
+        // File in radice: nessuna cartella di provenienza.
+        let root_file = file_modified("nota.txt", "2024-03-07T08:00:00Z", "nota.txt");
+        assert_eq!(folder_for_grouping(&root_file, Grouping::SourceFolder), None);
+
+        let nested = file_modified("nota.txt", "2024-03-07T08:00:00Z", "Progetto X/nota.txt");
+        assert_eq!(folder_for_grouping(&nested, Grouping::SourceFolder), Some("Progetto X".to_string()));
+    }
+
+    #[test]
+    fn grouping_proposal_lists_every_folder_it_will_create() {
+        let files = vec![
+            file_modified("a.txt", "2024-03-07T08:00:00Z", "a.txt"),
+            file_modified("b.txt", "2025-11-02T08:00:00Z", "b.txt"),
+        ];
+        let proposal = grouping_proposal(&files, Grouping::Month);
+        assert_eq!(proposal.grouping, Grouping::Month);
+        assert!(proposal.rules.is_empty());
+        let leaves = paths(&proposal.schema, "");
+        assert!(leaves.contains(&"2024/03 - Marzo".to_string()), "manca marzo: {leaves:?}");
+        assert!(leaves.contains(&"2025/11 - Novembre".to_string()), "manca novembre: {leaves:?}");
+        assert!(leaves.contains(&"Vari".to_string()), "manca la cartella di riserva");
+    }
 
     #[test]
     fn extracts_json_from_noisy_text() {
