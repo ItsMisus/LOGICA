@@ -5,13 +5,28 @@
 
 /* ---------------------------------- chat ---------------------------------- */
 
-/** File allegato a un messaggio: il testo lo legge il backend. */
+/** Immagine allegata, gia' codificata dal backend per il modello. */
+export interface AttachmentImage {
+  /** Tipo MIME: `image/png`, `image/jpeg`, `image/gif`, `image/webp`. */
+  media_type: string;
+  /** Contenuto in base64, senza prefisso `data:`. */
+  data: string;
+}
+
+/** Che cosa il backend e' riuscito a leggere dentro l'allegato. */
+export type AttachmentKind = "text" | "pdf" | "docx" | "image";
+
+/** File allegato a un messaggio: il contenuto lo estrae il backend. */
 export interface Attachment {
   name: string;
   path: string;
   size: number;
-  /** Contenuto testuale gia' tagliato; null se il file non e' leggibile. */
+  kind: AttachmentKind;
+  /** Contenuto testuale gia' tagliato; null per le immagini e per i file
+   *  che non si sono potuti leggere. */
   text: string | null;
+  /** Presente solo per le immagini: la guarda un modello che vede. */
+  image?: AttachmentImage;
   truncated: boolean;
   /** Perche' il file non e' stato letto, pronto da mostrare. */
   error: string | null;

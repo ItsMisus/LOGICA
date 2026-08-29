@@ -11,6 +11,7 @@ import {
   DEFAULT_PREFERENCES,
   type AiStatus,
   type Attachment,
+  type AttachmentImage,
   type AssistantDelta,
   type AssistantStatus,
   type ChatMessage,
@@ -52,11 +53,19 @@ function message(role: ChatMessage["role"], content: string, type: ChatMessage["
 function promptContent(m: ChatMessage): string {
   if (!m.attachments || m.attachments.length === 0) return m.content;
   const blocks = m.attachments.map((a) => {
+    // Le immagini non hanno testo: i byte viaggiano a parte, qui resta
+    // l'etichetta, cosi' il modello sa a cosa si riferisce la domanda.
+    if (a.kind === "image" && a.image) return `--- immagine allegata: ${a.name} ---`;
     if (a.text === null) return `--- allegato: ${a.name} (non letto: ${a.error ?? "motivo ignoto"}) ---`;
     const tail = a.truncated ? "\n[...contenuto troncato]" : "";
     return `--- allegato: ${a.name} ---\n${a.text}${tail}`;
   });
   return [m.content, ...blocks].filter((part) => part.length > 0).join("\n\n");
+}
+
+/** Le immagini di un messaggio, gia' pronte per il modello. */
+function promptImages(m: ChatMessage): AttachmentImage[] {
+  return (m.attachments ?? []).flatMap((a) => (a.image ? [a.image] : []));
 }
 
 /** Titolo di ripiego, finche' il modello non ne propone uno migliore. */
@@ -66,6 +75,18 @@ function titleFrom(text: string): string {
 }
 
 const UNTITLED = "Nuova chat";
+
+/**
+ * Modelli locali che sanno guardare una immagine. Un modello solo testuale
+ * riceve le immagini e le ignora in silenzio: meglio dirlo prima, invece di
+ * lasciar credere che la risposta le abbia viste.
+ */
+const VISION_MODELS = ["llava", "vision", "moondream", "bakllava", "minicpm-v", "-vl", "gemma3"];
+
+function seesImages(model: string): boolean {
+  const name = model.toLowerCase();
+  return VISION_MODELS.some((mark) => name.includes(mark));
+}
 
 export default function ChatPage() {
   const [preferences, setPreferences] = useState<Preferences>(DEFAULT_PREFERENCES);
@@ -225,6 +246,7 @@ export default function ChatPage() {
           chatId,
           message: promptContent(userMessage),
           history: turns,
+          images: promptImages(userMessage),
           config: aiConfig(),
         });
         if (!stillHere()) return;
@@ -291,11 +313,18 @@ export default function ChatPage() {
           for (const failed of attachments.filter((a) => a.error !== null)) {
             toast("error", `${failed.name}: ${failed.error}`);
           }
+          const images = attachments.filter((a) => a.image).length;
+          if (images > 0 && !preferences.use_premium_ai && !seesImages(preferences.ollama_model)) {
+            toast(
+              "info",
+              `${preferences.ollama_model} non guarda le immagini: scegli un modello con la vista (llava, llama3.2-vision) o passa a Claude.`,
+            );
+          }
         }
         await run(text, messages, attachments);
       })();
     },
-    [run, messages, toast],
+    [run, messages, toast, preferences.use_premium_ai, preferences.ollama_model],
   );
 
   const stop = useCallback(() => {

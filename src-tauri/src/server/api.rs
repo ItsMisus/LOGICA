@@ -289,6 +289,10 @@ struct TalkArgs {
     message: String,
     #[serde(default)]
     history: Vec<ChatTurn>,
+    /// Immagini allegate al messaggio, gia' in base64: da browser arrivano
+    /// dentro la richiesta, non da un percorso sul disco.
+    #[serde(default)]
+    images: Vec<crate::attachments::Image>,
     config: AiConfig,
 }
 
@@ -356,7 +360,8 @@ async fn command(
         /* ------------------------------ chat ------------------------------ */
         "talk" => match parse::<TalkArgs>(body) {
             Ok(a) => result(
-                crate::talk(app, a.chat_id, a.message, a.history, local_ai(a.config)).await,
+                crate::talk(app, a.chat_id, a.message, a.history, Some(a.images), local_ai(a.config))
+                    .await,
             ),
             Err(e) => e,
         },

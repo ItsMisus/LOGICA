@@ -11,6 +11,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 
 use crate::ai::{self, AiConfig, ChatTurn};
+use crate::attachments::Image;
 use crate::web;
 
 /// Come deve pensare e scrivere l'assistente. E' la parte che decide se le
@@ -155,7 +156,12 @@ fn system_prompt(cfg: &AiConfig, web_block: Option<&str>) -> String {
     prompt
 }
 
-fn history_messages(history: &[ChatTurn], message: &str) -> Vec<serde_json::Value> {
+fn history_messages(
+    history: &[ChatTurn],
+    message: &str,
+    images: &[Image],
+    premium: bool,
+) -> Vec<serde_json::Value> {
     let start = history.len().saturating_sub(MAX_HISTORY_TURNS);
     let mut out: Vec<serde_json::Value> = history[start..]
         .iter()
@@ -167,8 +173,50 @@ fn history_messages(history: &[ChatTurn], message: &str) -> Vec<serde_json::Valu
             serde_json::json!({ "role": role, "content": t.content })
         })
         .collect();
-    out.push(serde_json::json!({ "role": "user", "content": message }));
+    out.push(user_content(message, images, premium));
     out
+}
+
+/// Testo scritto dall'utente senza niente da dire: succede quando si allega
+/// una immagine e si preme invio.
+const LOOK_AT_IMAGES: &str = "Guarda le immagini allegate.";
+
+/// Il messaggio di questo turno, con le immagini allegate se ce ne sono.
+///
+/// I due motori le vogliono in due modi diversi: Claude in blocchi tipizzati
+/// dentro `content`, Ollama in un campo `images` accanto al testo. In
+/// entrambi i casi le immagini valgono solo per il turno in corso: nello
+/// storico restano le etichette scritte dal frontend, non i byte, o ogni
+/// messaggio successivo se le porterebbe dietro.
+fn user_content(message: &str, images: &[Image], premium: bool) -> serde_json::Value {
+    let text = if message.trim().is_empty() { LOOK_AT_IMAGES } else { message };
+
+    if images.is_empty() {
+        return serde_json::json!({ "role": "user", "content": text });
+    }
+
+    if premium {
+        // Immagini prima del testo: e' l'ordine in cui i modelli di Anthropic
+        // rispondono meglio quando la domanda riguarda quello che si vede.
+        let mut parts: Vec<serde_json::Value> = images
+            .iter()
+            .map(|img| {
+                serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.media_type,
+                        "data": img.data,
+                    }
+                })
+            })
+            .collect();
+        parts.push(serde_json::json!({ "type": "text", "text": text }));
+        serde_json::json!({ "role": "user", "content": parts })
+    } else {
+        let data: Vec<&str> = images.iter().map(|img| img.data.as_str()).collect();
+        serde_json::json!({ "role": "user", "content": text, "images": data })
+    }
 }
 
 /* ----------------------------- lettura stream ---------------------------- */
@@ -648,6 +696,7 @@ async fn gather_web(
 pub async fn stream_reply(
     message: &str,
     history: &[ChatTurn],
+    images: &[Image],
     cfg: &AiConfig,
     cancel: &AtomicBool,
     mut on_delta: impl FnMut(&str),
@@ -666,7 +715,7 @@ pub async fn stream_reply(
     };
 
     let system = system_prompt(cfg, block.as_deref());
-    let messages = history_messages(history, message);
+    let messages = history_messages(history, message, images, cfg.use_premium_ai);
 
     let mut reply = if cfg.use_premium_ai {
         stream_claude(&system, &messages, CHAT_TEMPERATURE, cancel, &mut on_delta).await
@@ -750,7 +799,7 @@ mod tests {
         let history: Vec<ChatTurn> = (0..40)
             .map(|i| ChatTurn { role: if i % 2 == 0 { "user" } else { "ai" }.to_string(), content: format!("m{i}") })
             .collect();
-        let messages = history_messages(&history, "ultimo");
+        let messages = history_messages(&history, "ultimo", &[], false);
 
         assert_eq!(messages.len(), MAX_HISTORY_TURNS + 1);
         assert_eq!(messages[0]["content"], "m10");
@@ -766,7 +815,7 @@ mod tests {
             ChatTurn { role: "user".to_string(), content: "ciao".to_string() },
             ChatTurn { role: "ai".to_string(), content: "   ".to_string() },
         ];
-        let messages = history_messages(&history, "ci sei?");
+        let messages = history_messages(&history, "ci sei?", &[], false);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["content"], "ciao");
         assert_eq!(messages[1]["content"], "ci sei?");
@@ -903,6 +952,7 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
             .block_on(stream_reply(
                 "chi ha vinto il campionato di Serie A 2024/2025?",
                 &[],
+                &[],
                 &cfg,
                 &cancel,
                 |_| {},
@@ -933,6 +983,7 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
         let reply = runtime
             .block_on(stream_reply(
                 "Rispondi solo con la parola: pronto",
+                &[],
                 &[],
                 &cfg,
                 &cancel,

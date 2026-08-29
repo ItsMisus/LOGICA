@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import Markdown from "./Markdown";
-import type { ChatMessage } from "../types";
+import type { Attachment, ChatMessage } from "../types";
 
 interface Props {
   message: ChatMessage;
@@ -10,6 +10,13 @@ interface Props {
   /** Ultima risposta dell'assistente: e' l'unica che ha senso rigenerare. */
   canRegenerate?: boolean;
   onRegenerate?: () => void;
+}
+
+/** Coda del tooltip di un allegato: da dove viene il testo che ha letto il
+ *  modello, e se e' stato tagliato. */
+function label(file: Attachment): string {
+  const kind = file.kind === "pdf" ? " - testo estratto dal PDF" : file.kind === "docx" ? " - testo estratto dal documento" : "";
+  return file.truncated ? `${kind} (troncato)` : kind;
 }
 
 /** Nel chip della fonte sta il sito, non l'indirizzo intero. */
@@ -36,16 +43,31 @@ export default function Message({ message, streaming, canRegenerate, onRegenerat
 
   if (message.role === "user") {
     const files = message.attachments ?? [];
+    const images = files.filter((f) => f.image);
+    const others = files.filter((f) => !f.image);
     return (
       <div className="turn user">
         <div className="user-bubble">
-          {files.length > 0 && (
+          {images.length > 0 && (
+            <div className="bubble-images">
+              {images.map((file) => (
+                <img
+                  key={file.path}
+                  className="bubble-image"
+                  src={`data:${file.image?.media_type};base64,${file.image?.data}`}
+                  alt={file.name}
+                  title={file.path}
+                />
+              ))}
+            </div>
+          )}
+          {others.length > 0 && (
             <div className="bubble-files">
-              {files.map((file) => (
+              {others.map((file) => (
                 <span
                   key={file.path}
                   className={`file-chip ${file.error ? "failed" : ""}`}
-                  title={file.error ? `${file.path} - ${file.error}` : file.path}
+                  title={file.error ? `${file.path} - ${file.error}` : `${file.path}${label(file)}`}
                 >
                   {file.name}
                 </span>

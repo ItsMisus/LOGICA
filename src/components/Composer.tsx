@@ -22,6 +22,18 @@ interface Props {
 /** Altezza massima del campo prima di iniziare a scorrere. */
 const MAX_HEIGHT = 220;
 
+/**
+ * Cosa il backend sa leggere davvero, in cima al dialogo di sistema. L'ultima
+ * voce lascia scegliere qualunque file: un `.conf` o un `.ini` sono testo lo
+ * stesso, e vietarlo qui vorrebbe dire indovinare al posto dell'utente.
+ */
+const FILTERS = [
+  { name: "Allegati leggibili", extensions: ["txt", "md", "csv", "json", "xml", "yml", "yaml", "log", "pdf", "docx", "png", "jpg", "jpeg", "gif", "webp"] },
+  { name: "Immagini", extensions: ["png", "jpg", "jpeg", "gif", "webp"] },
+  { name: "Documenti", extensions: ["pdf", "docx"] },
+  { name: "Tutti i file", extensions: ["*"] },
+];
+
 /** Nome del file dal percorso, senza dipendere dal separatore di sistema. */
 function baseName(path: string): string {
   const parts = path.split(/[\\/]/);
@@ -58,7 +70,7 @@ export default function Composer({
 
   async function pickFiles() {
     try {
-      const chosen = await open({ multiple: true, title: "Allega file" });
+      const chosen = await open({ multiple: true, title: "Allega file", filters: FILTERS });
       if (!chosen) return;
       const paths = Array.isArray(chosen) ? chosen : [chosen];
       // Stesso file scelto due volte: si tiene una copia sola.

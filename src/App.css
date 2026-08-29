@@ -829,6 +829,22 @@ button {
   margin-bottom: 8px;
 }
 
+/* Le immagini allegate si vedono, non si leggono: il chip col nome non
+   direbbe quello che l'utente ha appena mandato al modello. */
+.bubble-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.bubble-image {
+  max-width: 220px;
+  max-height: 180px;
+  border: 1px solid var(--border-strong);
+  object-fit: cover;
+}
+
 .file-chip {
   display: inline-flex;
   align-items: center;

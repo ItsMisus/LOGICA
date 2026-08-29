@@ -92,6 +92,9 @@ async fn talk(
     chat_id: String,
     message: String,
     history: Vec<ChatTurn>,
+    // Immagini allegate a questo messaggio, per i modelli che vedono. Manca
+    // nelle chiamate scritte prima che gli allegati diventassero visivi.
+    images: Option<Vec<attachments::Image>>,
     config: AiConfig,
 ) -> Result<TalkReply, String> {
     let cancel = {
@@ -100,6 +103,8 @@ async fn talk(
         state.stop.clone()
     };
 
+    let images = images.unwrap_or_default();
+
     let emitter = app.clone();
     let stream_id = chat_id.clone();
     let status_emitter = app.clone();
@@ -107,6 +112,7 @@ async fn talk(
     let reply = assistant::stream_reply(
         &message,
         &history,
+        &images,
         &config,
         &cancel,
         move |delta| {
