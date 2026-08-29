@@ -1,0 +1,471 @@
+//! Costruzione del prompt, chiamata all'AI (Ollama locale o Claude API) e
+//! validazione della proposta. Se qualcosa va storto si ricade sempre su uno
+//! schema deterministico per categoria di estensione: l'app non si blocca mai.
+
+use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+use crate::scanner::FileInfo;
+
+const OLLAMA_URL: &str = "http://localhost:11434";
+const CLAUDE_URL: &str = "https://api.anthropic.com/v1/messages";
+const CLAUDE_MODEL: &str = "claude-opus-5";
+const AI_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_SAMPLES: usize = 100;
+/// Profondita' massima consentita nello schema: evita alberi assurdi.
+const MAX_SCHEMA_DEPTH: usize = 4;
+
+/// Albero di cartelle annidate: { "Documenti": { "PDF": {} } }
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SchemaNode(pub BTreeMap<String, SchemaNode>);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Rule {
+    pub pattern: String,
+    pub destination: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrganizationProposal {
+    pub schema: SchemaNode,
+    pub rules: Vec<Rule>,
+    pub rationale: String,
+    /// "ollama" | "claude" | "fallback"
+    pub source: String,
+}
+
+/// Forma grezza attesa dall'AI (senza `source`, che aggiungiamo noi).
+#[derive(Debug, Deserialize)]
+struct RawProposal {
+    #[serde(default)]
+    schema: SchemaNode,
+    #[serde(default)]
+    rules: Vec<Rule>,
+    #[serde(default)]
+    rationale: String,
+}
+
+/* ------------------------------ aggregazione ------------------------------ */
+
+struct Aggregate {
+    total: usize,
+    total_size: u64,
+    by_extension: Vec<(String, usize)>,
+    oldest: String,
+    newest: String,
+    samples: Vec<String>,
+}
+
+fn aggregate(files: &[FileInfo]) -> Aggregate {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut total_size = 0u64;
+    for f in files {
+        let ext = if f.extension.is_empty() { "(nessuna)".to_string() } else { f.extension.clone() };
+        *counts.entry(ext).or_insert(0) += 1;
+        total_size += f.size;
+    }
+    let mut by_extension: Vec<(String, usize)> = counts.into_iter().collect();
+    by_extension.sort_by(|a, b| b.1.cmp(&a.1));
+    by_extension.truncate(25);
+
+    let mut dates: Vec<&str> = files.iter().map(|f| f.modified.as_str()).collect();
+    dates.sort_unstable();
+
+    // Campione uniforme sull'intera lista, non solo i primi N file.
+    let stride = (files.len() / MAX_SAMPLES).max(1);
+    let samples = files
+        .iter()
+        .step_by(stride)
+        .take(MAX_SAMPLES)
+        .map(|f| {
+            let preview = f
+                .content_preview
+                .as_deref()
+                // take su chars: evita di tagliare a meta' un carattere UTF-8
+                .map(|p| format!(" | {}", p.chars().take(80).collect::<String>()))
+                .unwrap_or_default();
+            format!("{} ({} KB){}", f.relative_path, f.size / 1024, preview)
+        })
+        .collect();
+
+    Aggregate {
+        total: files.len(),
+        total_size,
+        by_extension,
+        oldest: dates.first().unwrap_or(&"-").to_string(),
+        newest: dates.last().unwrap_or(&"-").to_string(),
+        samples,
+    }
+}
+
+fn build_prompt(files: &[FileInfo], user_preferences: Option<&str>) -> String {
+    let agg = aggregate(files);
+    let ext_lines = agg
+        .by_extension
+        .iter()
+        .map(|(e, c)| format!("- .{e}: {c} file"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prefs = user_preferences
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| format!("\nPreferenze dell'utente: {p}\n"))
+        .unwrap_or_default();
+
+    format!(
+        "Sei un assistente che progetta strutture di cartelle. Analizza questa cartella e proponi \
+un'organizzazione chiara, con nomi in italiano, massimo {MAX_SCHEMA_DEPTH} livelli di profondita'.
+
+STATISTICHE
+- File totali: {total}
+- Dimensione totale: {size_mb} MB
+- Modifiche dal {oldest} al {newest}
+
+ESTENSIONI PIU' FREQUENTI
+{ext_lines}
+
+CAMPIONE DI FILE
+{samples}
+{prefs}
+Rispondi SOLO con un oggetto JSON valido, senza testo attorno, in questa forma esatta:
+{{
+  \"schema\": {{ \"Documenti\": {{ \"PDF\": {{}} }}, \"Immagini\": {{}} }},
+  \"rules\": [ {{ \"pattern\": \"*.pdf\", \"destination\": \"Documenti/PDF\" }} ],
+  \"rationale\": \"Una o due frasi che spiegano la logica.\"
+}}
+
+Vincoli:
+- \"schema\" e' un albero di cartelle annidate; le foglie sono oggetti vuoti {{}}.
+- Ogni \"destination\" deve essere un percorso relativo presente in \"schema\", separato da /.
+- I pattern ammessi sono: \"*.est\", \"prefisso*\", \"*suffisso\", \"*parte*\" o un nome esatto.
+- Copri le estensioni piu' frequenti; i file non coperti finiranno in \"Vari\".
+- Niente percorsi assoluti, niente \"..\", niente lettere di unita'.",
+        total = agg.total,
+        size_mb = agg.total_size / 1_048_576,
+        oldest = agg.oldest,
+        newest = agg.newest,
+        ext_lines = ext_lines,
+        samples = agg.samples.join("\n"),
+        prefs = prefs,
+    )
+}
+
+/* --------------------------------- chiamate -------------------------------- */
+
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(AI_TIMEOUT)
+        .build()
+        .map_err(|e| format!("Client HTTP non inizializzabile: {e}"))
+}
+
+/// True se il demone Ollama risponde su localhost:11434.
+pub async fn check_ollama_connection() -> bool {
+    let client = match reqwest::Client::builder().timeout(Duration::from_secs(3)).build() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    client
+        .get(format!("{OLLAMA_URL}/api/tags"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+async fn call_ollama(model: &str, prompt: &str) -> Result<String, String> {
+    #[derive(Deserialize)]
+    struct OllamaResponse {
+        response: String,
+    }
+
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "stream": false,
+        "format": "json",           // forza Ollama a produrre JSON puro
+        "options": { "temperature": 0.2 }
+    });
+
+    let res = http_client()?
+        .post(format!("{OLLAMA_URL}/api/generate"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Ollama non raggiungibile: {e}"))?;
+
+    if !res.status().is_success() {
+        return Err(format!("Ollama ha risposto {}", res.status()));
+    }
+    let parsed: OllamaResponse = res
+        .json()
+        .await
+        .map_err(|e| format!("Risposta Ollama illeggibile: {e}"))?;
+    Ok(parsed.response)
+}
+
+async fn call_claude(prompt: &str) -> Result<String, String> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "ANTHROPIC_API_KEY non impostata: imposta la chiave o usa Ollama.".to_string())?;
+
+    let body = serde_json::json!({
+        "model": CLAUDE_MODEL,
+        "max_tokens": 4000,
+        "messages": [{ "role": "user", "content": prompt }]
+    });
+
+    let res = http_client()?
+        .post(CLAUDE_URL)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Claude API non raggiungibile: {e}"))?;
+
+    let status = res.status();
+    let value: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Risposta Claude illeggibile: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("Claude API ha risposto {status}: {value}"));
+    }
+
+    // La risposta puo' contenere piu' blocchi (es. thinking): prendiamo il primo testo.
+    value["content"]
+        .as_array()
+        .and_then(|blocks| {
+            blocks
+                .iter()
+                .find(|b| b["type"] == "text")
+                .and_then(|b| b["text"].as_str())
+        })
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Claude non ha restituito testo.".to_string())
+}
+
+/* -------------------------------- parsing --------------------------------- */
+
+/// Estrae il primo oggetto JSON bilanciato dal testo (i modelli spesso
+/// aggiungono spiegazioni o code fence attorno al JSON).
+fn extract_json(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in text[start..].char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[start..start + i + 1]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Ripulisce un singolo nome di cartella da caratteri illegali su Windows.
+fn sanitize_component(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\' | '/'))
+        .collect();
+    cleaned.trim().trim_matches('.').to_string()
+}
+
+/// Normalizza una destinazione: relativa, senza "..", max profondita'.
+pub fn sanitize_destination(dest: &str) -> Option<String> {
+    let parts: Vec<String> = dest
+        .replace('\\', "/")
+        .split('/')
+        .map(sanitize_component)
+        .filter(|p| !p.is_empty() && p != "." && p != "..")
+        .take(MAX_SCHEMA_DEPTH)
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn insert_path(schema: &mut SchemaNode, dest: &str) {
+    let mut node = schema;
+    for part in dest.split('/') {
+        node = node.0.entry(part.to_string()).or_default();
+    }
+}
+
+fn prune_schema(node: &SchemaNode, depth: usize) -> SchemaNode {
+    if depth >= MAX_SCHEMA_DEPTH {
+        return SchemaNode::default();
+    }
+    let mut out = BTreeMap::new();
+    for (name, child) in &node.0 {
+        let clean = sanitize_component(name);
+        if clean.is_empty() {
+            continue;
+        }
+        out.insert(clean, prune_schema(child, depth + 1));
+    }
+    SchemaNode(out)
+}
+
+/// Valida e ripara la proposta grezza dell'AI.
+fn validate(raw: RawProposal, source: &str) -> Result<OrganizationProposal, String> {
+    let mut schema = prune_schema(&raw.schema, 0);
+
+    let mut rules = Vec::new();
+    for r in raw.rules {
+        let pattern = r.pattern.trim().to_lowercase();
+        if pattern.is_empty() {
+            continue;
+        }
+        if let Some(dest) = sanitize_destination(&r.destination) {
+            // Ogni destinazione deve esistere nell'albero mostrato all'utente.
+            insert_path(&mut schema, &dest);
+            rules.push(Rule { pattern, destination: dest });
+        }
+    }
+
+    if rules.is_empty() {
+        return Err("La proposta AI non contiene regole utilizzabili.".to_string());
+    }
+
+    // "Vari" e' la destinazione di riserva usata da file_mapper.
+    insert_path(&mut schema, "Vari");
+
+    let rationale = if raw.rationale.trim().is_empty() {
+        "Nessuna spiegazione fornita dal modello.".to_string()
+    } else {
+        raw.rationale.trim().to_string()
+    };
+
+    Ok(OrganizationProposal { schema, rules, rationale, source: source.to_string() })
+}
+
+/* -------------------------------- fallback -------------------------------- */
+
+/// Categoria di destinazione per estensione: usata dal fallback deterministico.
+fn category_for(ext: &str) -> &'static str {
+    match ext {
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "svg" | "heic" | "tiff" => "Immagini",
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "webm" | "flv" => "Video",
+        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "Audio",
+        "pdf" => "Documenti/PDF",
+        "doc" | "docx" | "odt" | "rtf" | "txt" | "md" => "Documenti/Testi",
+        "xls" | "xlsx" | "csv" | "ods" => "Documenti/Fogli",
+        "ppt" | "pptx" | "odp" => "Documenti/Presentazioni",
+        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" => "Archivi",
+        "exe" | "msi" | "dmg" | "appimage" | "deb" | "apk" => "Programmi",
+        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "java" | "c" | "cpp" | "h" | "go" | "rb"
+        | "php" | "cs" | "sh" | "ps1" => "Codice",
+        "json" | "xml" | "yaml" | "yml" | "toml" | "ini" | "cfg" => "Dati",
+        "iso" | "img" | "vhd" => "Immagini disco",
+        _ => "Vari",
+    }
+}
+
+/// Schema semplice per estensione. Non bellissimo, ma sempre valido.
+pub fn fallback_proposal(files: &[FileInfo]) -> OrganizationProposal {
+    let mut schema = SchemaNode::default();
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+
+    for f in files {
+        if f.extension.is_empty() {
+            continue;
+        }
+        let dest = category_for(&f.extension).to_string();
+        seen.insert(f.extension.clone(), dest);
+    }
+
+    let rules: Vec<Rule> = seen
+        .into_iter()
+        .map(|(ext, dest)| {
+            insert_path(&mut schema, &dest);
+            Rule { pattern: format!("*.{ext}"), destination: dest }
+        })
+        .collect();
+
+    insert_path(&mut schema, "Vari");
+
+    OrganizationProposal {
+        schema,
+        rules,
+        rationale: "Schema di riserva: i file sono raggruppati per tipo di estensione.".to_string(),
+        source: "fallback".to_string(),
+    }
+}
+
+/* ------------------------------- entry point ------------------------------- */
+
+/// Ottiene una proposta di organizzazione. Non fallisce mai: in caso di errore
+/// AI ritorna lo schema di fallback.
+pub async fn get_organization_proposal(
+    files: &[FileInfo],
+    use_ollama: bool,
+    model: &str,
+    user_preferences: Option<&str>,
+) -> OrganizationProposal {
+    if files.is_empty() {
+        return fallback_proposal(files);
+    }
+
+    let prompt = build_prompt(files, user_preferences);
+    let source = if use_ollama { "ollama" } else { "claude" };
+
+    let raw_text = if use_ollama {
+        call_ollama(model, &prompt).await
+    } else {
+        call_claude(&prompt).await
+    };
+
+    let parsed = raw_text.and_then(|text| {
+        let json = extract_json(&text).ok_or_else(|| "Nessun JSON nella risposta AI.".to_string())?;
+        serde_json::from_str::<RawProposal>(json).map_err(|e| format!("JSON AI non valido: {e}"))
+    });
+
+    match parsed.and_then(|raw| validate(raw, source)) {
+        Ok(proposal) => proposal,
+        Err(err) => {
+            eprintln!("[ai_analyzer] fallback attivato: {err}");
+            fallback_proposal(files)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_json_from_noisy_text() {
+        let text = "Ecco il risultato:\n```json\n{\"a\": {\"b\": \"}\"}}\n```\nfine";
+        assert_eq!(extract_json(text), Some("{\"a\": {\"b\": \"}\"}}"));
+    }
+
+    #[test]
+    fn rejects_traversal_and_absolute_paths() {
+        assert_eq!(sanitize_destination("../../etc"), Some("etc".to_string()));
+        assert_eq!(sanitize_destination("C:/Windows"), Some("C/Windows".to_string()));
+        assert_eq!(sanitize_destination("   "), None);
+    }
+}

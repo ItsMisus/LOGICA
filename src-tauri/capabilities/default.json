@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permessi minimi: finestra principale + dialog per scegliere la cartella",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default"]
+}
