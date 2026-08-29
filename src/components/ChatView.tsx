@@ -18,6 +18,8 @@ interface Props {
   onSend: (text: string, attachmentPaths: string[]) => void;
   onStop: () => void;
   onRegenerate: () => void;
+  /** Riscrive un messaggio dell'utente e riparte da li'. */
+  onEdit: (messageId: string, text: string) => void;
   /** Errori dei componenti figli (dialogo allegati) mostrati come notifica. */
   onError: (message: string) => void;
 }
@@ -52,6 +54,7 @@ export default function ChatView({
   onSend,
   onStop,
   onRegenerate,
+  onEdit,
   onError,
 }: Props) {
   const scroller = useRef<HTMLDivElement | null>(null);
@@ -129,6 +132,8 @@ export default function ChatView({
                   message={message}
                   canRegenerate={!streaming && message.id === lastAssistant?.id}
                   onRegenerate={onRegenerate}
+                  canEdit={!streaming && message.role === "user"}
+                  onEdit={(text) => onEdit(message.id, text)}
                 />
               ))}
 

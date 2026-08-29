@@ -265,11 +265,14 @@ button {
 }
 
 .chat-item {
+  padding: 0 12px 0 16px;
+  border-left: 2px solid transparent;
+}
+
+.chat-item-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 12px 0 16px;
-  border-left: 2px solid transparent;
 }
 
 .chat-item:hover {
@@ -317,30 +320,91 @@ button {
   color: var(--faint);
 }
 
-/* Il tasto elimina prende il posto dell'ora al passaggio del mouse. */
+/* Il tasto delle azioni prende il posto dell'ora al passaggio del mouse. */
 .chat-item:hover .chat-item-time,
 .chat-item:focus-within .chat-item-time {
   display: none;
 }
 
-.chat-item-del {
+.chat-item-more {
   display: none;
   flex: none;
   padding: 2px 4px;
-  font-size: 11px;
-  letter-spacing: 0.04em;
+  font-size: 13px;
+  line-height: 1;
   color: var(--faint);
 }
 
-.chat-item:hover .chat-item-del,
-.chat-item:focus-within .chat-item-del,
-.chat-item-del.confirm {
+.chat-item:hover .chat-item-more,
+.chat-item:focus-within .chat-item-more,
+.chat-item-more.open {
   display: block;
 }
 
-.chat-item-del:hover,
-.chat-item-del.confirm {
+.chat-item-more:hover,
+.chat-item-more.open {
+  color: var(--text);
+}
+
+/* Titolo in modifica: stesso posto e stesso corpo di quello scritto, cosi'
+   la riga non salta quando si passa da leggere a scrivere. */
+.chat-item-rename {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  outline: none;
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+/* Il pezzo di messaggio che ha fatto comparire la chat fra i risultati. */
+.chat-item-snippet {
+  margin: 0 0 8px 13px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--faint);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.chat-menu {
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 8px 13px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+}
+
+.chat-menu button {
+  padding: 7px 10px;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.chat-menu button:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.chat-menu button.danger:hover,
+.chat-menu button.confirm {
   color: var(--error);
+}
+
+.search-clear {
+  flex: none;
+  padding: 0 2px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.search-clear:hover {
+  color: var(--text);
 }
 
 .empty-note {
@@ -612,6 +676,47 @@ button {
 .tool-btn:hover {
   border-color: var(--border);
   color: var(--text);
+}
+
+.tool-btn.primary {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.tool-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Le azioni del turno dell'utente stanno sotto la bolla, quindi a destra. */
+.user-actions {
+  justify-content: flex-end;
+}
+
+/* Riscrittura di un messaggio gia' mandato: il campo prende il posto del
+   testo dentro la bolla, cosi' la conversazione non si sposta. */
+.bubble-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bubble-edit-field {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  outline: none;
+  resize: vertical;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.bubble-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
 }
 
 .notice {

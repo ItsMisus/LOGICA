@@ -182,6 +182,39 @@ fn delete_chat(chat_id: String) -> Result<(), String> {
     storage::delete_chat(&chat_id)
 }
 
+/// Cerca dentro le conversazioni salvate, contenuto compreso.
+#[tauri::command]
+fn search_chats(query: String) -> Result<Vec<storage::ChatMatch>, String> {
+    storage::search_chats(&query)
+}
+
+#[tauri::command]
+fn rename_chat(chat_id: String, title: String) -> Result<ChatMetadata, String> {
+    storage::rename_chat(&chat_id, &title)
+}
+
+#[tauri::command]
+fn duplicate_chat(chat_id: String) -> Result<ChatMetadata, String> {
+    storage::duplicate_chat(&chat_id)
+}
+
+/// Il testo della conversazione da salvare fuori dall'app: `markdown` per
+/// leggerla, `json` per riaverla intera.
+#[tauri::command]
+fn export_chat(chat_id: String, format: String) -> Result<String, String> {
+    storage::export_chat(&chat_id, &format)
+}
+
+/// Scrive l'esportazione dove l'utente ha detto nel dialogo di sistema.
+///
+/// Non ha una strada dal server web: dal browser il file si scarica, e un
+/// comando che scrive un percorso qualsiasi sul PC non deve esistere per chi
+/// arriva dalla rete, nemmeno con la sessione valida.
+#[tauri::command]
+fn save_export(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|e| format!("Salvataggio fallito su {path}: {e}"))
+}
+
 #[tauri::command]
 fn get_preferences() -> Preferences {
     storage::load_preferences()
@@ -324,6 +357,11 @@ fn main() {
             load_chat,
             list_chats,
             delete_chat,
+            search_chats,
+            rename_chat,
+            duplicate_chat,
+            export_chat,
+            save_export,
             get_preferences,
             set_preferences,
             get_config,

@@ -318,6 +318,26 @@ struct ChatIdArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct QueryArgs {
+    query: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameArgs {
+    chat_id: String,
+    title: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportArgs {
+    chat_id: String,
+    format: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SaveChatArgs {
     chat: StoredChat,
 }
@@ -399,6 +419,22 @@ async fn command(
         "list_chats" => result(crate::list_chats()),
         "delete_chat" => match parse::<ChatIdArgs>(body) {
             Ok(a) => result(crate::delete_chat(a.chat_id)),
+            Err(e) => e,
+        },
+        "search_chats" => match parse::<QueryArgs>(body) {
+            Ok(a) => result(crate::search_chats(a.query)),
+            Err(e) => e,
+        },
+        "rename_chat" => match parse::<RenameArgs>(body) {
+            Ok(a) => result(crate::rename_chat(a.chat_id, a.title)),
+            Err(e) => e,
+        },
+        "duplicate_chat" => match parse::<ChatIdArgs>(body) {
+            Ok(a) => result(crate::duplicate_chat(a.chat_id)),
+            Err(e) => e,
+        },
+        "export_chat" => match parse::<ExportArgs>(body) {
+            Ok(a) => result(crate::export_chat(a.chat_id, a.format)),
             Err(e) => e,
         },
 

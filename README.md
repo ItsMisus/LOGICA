@@ -21,9 +21,9 @@ citando le pagine che ha letto.
 └──────────────────┴─────────────────────────────────────────┘
 ```
 
-Impianto grafico ispirato alle interfacce di Anthropic: fondo avorio, colonna di lettura stretta e
-centrata, bolla solo per i messaggi dell'utente, arancione *book cloth* come unico accento, titoli
-in serif. Tema chiaro di default, scuro nelle impostazioni.
+Impianto grafico squadrato: fondo quasi nero, colonna di lettura stretta e centrata, bolla solo per
+i messaggi dell'utente, bordeaux come unico accento, micro-etichette maiuscole spaziate. Tema scuro
+di default, chiaro nelle impostazioni.
 
 ---
 
@@ -74,6 +74,9 @@ Il modello usato è `claude-opus-5`. Senza chiave l'app resta su Ollama.
   la rilancia al frontend come eventi `assistant-delta`; il testo compare mentre viene generato.
 - **Interrompi**: il pulsante quadrato ferma la generazione e **tiene** il testo già arrivato.
 - **Rigenera**: rimanda l'ultima domanda senza l'ultima risposta.
+- **Modifica**: qualsiasi messaggio dell'utente si riscrive e riparte da lì. Quello che veniva dopo
+  viene lasciato indietro: per tenere anche la strada vecchia si duplica prima la conversazione
+  (menu `⋯` nella barra laterale).
 - **Storico**: al modello vanno gli ultimi 30 turni della chat corrente, più le istruzioni
   personalizzate scritte nelle impostazioni e la data di oggi.
 - **Titolo**: dopo il primo scambio è il modello stesso a proporlo; se non ne esce niente di
@@ -87,6 +90,35 @@ prima delle premesse, niente adulazione, una domanda sola quando la richiesta è
 divieto di fingere accessi che non ha (file, rete, altri programmi).
 
 Scorciatoie: **Invio** manda, **Shift+Invio** va a capo, **Ctrl+N** apre una conversazione nuova.
+
+### Allegati
+
+Il pulsante `+` del composer apre il dialogo di sistema; il contenuto lo legge il backend
+(`src-tauri/src/attachments.rs`), l'app non copia niente da nessuna parte.
+
+| Tipo | Cosa arriva al modello | Limite |
+|---|---|---|
+| Testo (`.txt`, `.md`, `.csv`, sorgenti, …) | il testo, tagliato a 12.000 caratteri | 2 MB |
+| PDF | il testo estratto | 20 MB |
+| DOCX | il testo dei paragrafi | 20 MB |
+| Immagini (`png`, `jpeg`, `gif`, `webp`) | il file in base64 | 3 MB |
+
+Dettagli che si notano solo quando mancano: un file non UTF-8 viene riprovato in **Windows-1252**
+prima di dichiararlo illeggibile; un PDF fatto di scansioni lo dice invece di tornare vuoto; un PDF
+malfatto che manda in panico l'estrattore diventa un messaggio, non un crash dell'app.
+
+Le immagini le guarda solo un modello che vede: **Claude**, oppure un modello Ollama con la vista
+(`llava`, `llama3.2-vision`, …). Con un modello solo testuale l'app lo dice prima di mandare. Valgono
+per il turno in cui sono allegate: nello storico resta l'etichetta, non i byte.
+
+### Conversazioni
+
+- **Ricerca** (`search_chats`): cerca dentro i messaggi, non solo nei titoli, e mostra il pezzo di
+  testo in cui la parola compare. Confronto in minuscolo, sottostringa secca.
+- **Menu `⋯`** su ogni conversazione: **rinomina** (non la fa risalire in cima: la data resta quella
+  dell'ultimo messaggio), **duplica** (per cambiare strada senza perdere quella di prima),
+  **esporta** in Markdown o JSON, **elimina** con conferma.
+- L'esportazione sul desktop passa dal dialogo di sistema; da browser il file si scarica.
 
 ### Ricerca su internet
 
@@ -143,6 +175,11 @@ Una chat salvata:
 
 Gli id delle chat accettano solo `[A-Za-z0-9_-]`: nessuna scrittura fuori da `~/.logica/chats/`.
 
+Gli allegati restano dentro il file della chat: il testo estratto, e per le immagini il base64. Una
+conversazione con immagini pesa quindi quanto le immagini (al più 3 MB l'una, un terzo in più una
+volta codificate). In cambio la chat è completa da sola: si può riaprire, modificare un messaggio e
+rigenerare anche se il file originale nel frattempo è stato spostato.
+
 ---
 
 ## Accesso da browser
@@ -191,10 +228,10 @@ file-organizer-ai/
 ├── src/
 │   ├── components/
 │   │   ├── ChatView.tsx           header, thread, schermata iniziale, composer
-│   │   ├── Message.tsx            bolla utente / risposta + azioni (copia, rigenera)
+│   │   ├── Message.tsx            bolla utente / risposta + azioni (copia, rigenera, modifica)
 │   │   ├── Markdown.tsx           markdown minimo, senza dipendenze
 │   │   ├── Composer.tsx           campo che cresce, invio/interrompi
-│   │   ├── Sidebar.tsx            conversazioni per data, ricerca, impostazioni
+│   │   ├── Sidebar.tsx            conversazioni per data, ricerca nel contenuto, menu azioni
 │   │   ├── SettingsModal.tsx      motore AI, modello, internet, istruzioni, tema
 │   │   └── NotificationToast.tsx  toast
 │   │   ├── LoginScreen.tsx        accesso da browser (invisibile sul desktop)
@@ -213,20 +250,25 @@ file-organizer-ai/
     │   └── tls.rs               certificato auto-firmato e impronta
     ├── assistant.rs             prompt, streaming Ollama/Claude, ricerca web, titolo
     ├── web.rs                   ricerca (DuckDuckGo, Bing), pagine, HTML → testo
-    ├── attachments.rs           lettura dei file allegati a un messaggio
+    ├── attachments.rs           allegati: testo, PDF, DOCX, immagini in base64
     ├── ai.rs                    configurazione del motore AI e stato della connessione
-    └── storage.rs               ~/.logica: chat, preferenze, configurazione
+    └── storage.rs               ~/.logica: chat, ricerca, esportazione, preferenze
 ```
 
 ### Comandi Tauri usati dalla chat
 
 | Comando | Argomenti (JS) | Ritorna |
 |---|---|---|
-| `talk` | `chatId`, `message`, `history`, `config` | `{ text, stopped, error, sources }` |
+| `talk` | `chatId`, `message`, `history`, `images`, `config` | `{ text, stopped, error, sources }` |
 | `stop_talk` | — | — |
 | `suggest_title` | `question`, `answer`, `config` | `string \| null` |
 | `read_attachments` | `paths` | `Attachment[]` |
 | `save_chat` / `load_chat` / `list_chats` / `delete_chat` | `chat` / `chatId` | `—` / `StoredChat` / `ChatMetadata[]` / `—` |
+| `search_chats` | `query` | `ChatMatch[]` |
+| `rename_chat` | `chatId`, `title` | `ChatMetadata` |
+| `duplicate_chat` | `chatId` | `ChatMetadata` |
+| `export_chat` | `chatId`, `format` (`markdown` \| `json`) | `string` |
+| `save_export` | `path`, `content` | `—` (solo desktop: non ha una rotta sul server) |
 | `get_preferences` / `set_preferences` | — / `preferences` | `Preferences` / `—` |
 | `get_config` / `set_config` | — / `config` | `Config` / `—` |
 | `check_ai_status` | `ollamaUrl` | `{ ollama, claude, models }` |

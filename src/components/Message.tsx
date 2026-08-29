@@ -10,6 +10,10 @@ interface Props {
   /** Ultima risposta dell'assistente: e' l'unica che ha senso rigenerare. */
   canRegenerate?: boolean;
   onRegenerate?: () => void;
+  /** Il messaggio dell'utente si puo' riscrivere: fermo il modello, si'. */
+  canEdit?: boolean;
+  /** Manda di nuovo questo turno con il testo cambiato. */
+  onEdit?: (text: string) => void;
 }
 
 /** Coda del tooltip di un allegato: da dove viene il testo che ha letto il
@@ -28,8 +32,17 @@ function hostOf(url: string): string {
   }
 }
 
-export default function Message({ message, streaming, canRegenerate, onRegenerate }: Props) {
+export default function Message({
+  message,
+  streaming,
+  canRegenerate,
+  onRegenerate,
+  canEdit,
+  onEdit,
+}: Props) {
   const [copied, setCopied] = useState(false);
+  /** Testo in riscrittura: `null` quando il messaggio si sta solo leggendo. */
+  const [draft, setDraft] = useState<string | null>(null);
 
   async function copy() {
     try {
@@ -39,6 +52,14 @@ export default function Message({ message, streaming, canRegenerate, onRegenerat
     } catch {
       // Clipboard negata dal sistema: si lascia perdere in silenzio.
     }
+  }
+
+  /** Manda il testo riscritto: da qui in poi la conversazione riparte. */
+  function resend() {
+    const text = draft?.trim() ?? "";
+    if (text.length === 0 || !onEdit) return;
+    setDraft(null);
+    onEdit(text);
   }
 
   if (message.role === "user") {
@@ -74,8 +95,47 @@ export default function Message({ message, streaming, canRegenerate, onRegenerat
               ))}
             </div>
           )}
-          {message.content}
+          {draft === null ? (
+            message.content
+          ) : (
+            <div className="bubble-edit">
+              <textarea
+                className="bubble-edit-field"
+                value={draft}
+                autoFocus
+                aria-label="Riscrivi il messaggio"
+                rows={Math.min(12, draft.split("\n").length + 1)}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  // Invio manda, Shift+Invio va a capo: come nel composer.
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    resend();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setDraft(null);
+                  }
+                }}
+              />
+              <div className="bubble-edit-actions">
+                <button className="tool-btn" onClick={() => setDraft(null)}>
+                  Annulla
+                </button>
+                <button className="tool-btn primary" onClick={resend} disabled={draft.trim().length === 0}>
+                  Invia di nuovo
+                </button>
+              </div>
+            </div>
+          )}
         </div>
+
+        {draft === null && canEdit && onEdit && (
+          <div className="turn-actions user-actions">
+            <button className="tool-btn" onClick={() => setDraft(message.content)}>
+              Modifica
+            </button>
+          </div>
+        )}
       </div>
     );
   }

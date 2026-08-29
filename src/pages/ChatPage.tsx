@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { call, subscribe } from "../api";
+import { save } from "@tauri-apps/plugin-dialog";
+
+import { call, isDesktop, subscribe } from "../api";
 
 import ChatView from "../components/ChatView";
 import NotificationToast from "../components/NotificationToast";
@@ -14,10 +16,12 @@ import {
   type AttachmentImage,
   type AssistantDelta,
   type AssistantStatus,
+  type ChatMatch,
   type ChatMessage,
   type ChatMetadata,
   type ChatTurn,
   type Config,
+  type ExportFormat,
   type Preferences,
   type StoredChat,
   type TalkReply,
@@ -66,6 +70,19 @@ function promptContent(m: ChatMessage): string {
 /** Le immagini di un messaggio, gia' pronte per il modello. */
 function promptImages(m: ChatMessage): AttachmentImage[] {
   return (m.attachments ?? []).flatMap((a) => (a.image ? [a.image] : []));
+}
+
+/**
+ * Nome del file proposto quando si esporta. Si tengono lettere, cifre, spazi e
+ * trattini: il resto puo' essere un carattere che il sistema non accetta in un
+ * nome di file, e un dialogo che si rifiuta di aprirsi non si spiega da solo.
+ */
+function fileNameFor(title: string | undefined): string {
+  const clean = (title ?? "")
+    .replace(/[^\p{L}\p{N} _-]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clean.length > 0 ? clean.slice(0, 60) : "conversazione";
 }
 
 /** Titolo di ripiego, finche' il modello non ne propone uno migliore. */
@@ -339,6 +356,20 @@ export default function ChatPage() {
     void run(lastUser.content, messages.slice(0, index), lastUser.attachments ?? []);
   }, [messages, run]);
 
+  /**
+   * Riscrive un messaggio gia' mandato e riparte da li'. Quello che veniva
+   * dopo viene lasciato indietro: se serve tenerlo, si duplica prima la
+   * conversazione dal menu della barra laterale.
+   */
+  const editMessage = useCallback(
+    (messageId: string, text: string) => {
+      const index = messages.findIndex((m) => m.id === messageId);
+      if (index < 0) return;
+      void run(text, messages.slice(0, index), messages[index].attachments ?? []);
+    },
+    [messages, run],
+  );
+
   /* ------------------------------ gestione chat ----------------------------- */
 
   const newChat = useCallback(() => {
@@ -370,6 +401,86 @@ export default function ChatPage() {
       }
     },
     [chatId, stop, toast],
+  );
+
+  /** Cerca dentro le conversazioni: la lista la disegna la barra laterale. */
+  const searchChats = useCallback(
+    async (query: string) => {
+      try {
+        return await call<ChatMatch[]>("search_chats", { query });
+      } catch (e) {
+        toast("error", `Ricerca non riuscita: ${String(e)}`);
+        return [];
+      }
+    },
+    [toast],
+  );
+
+  const renameChat = useCallback(
+    async (id: string, newTitle: string) => {
+      try {
+        const meta = await call<ChatMetadata>("rename_chat", { chatId: id, title: newTitle });
+        setChats(await call<ChatMetadata[]>("list_chats"));
+        // Se e' la conversazione aperta, il titolo in memoria deve seguire, o
+        // il primo salvataggio successivo riscriverebbe quello vecchio.
+        if (id === chatId) setTitle(meta.title);
+      } catch (e) {
+        toast("error", `Titolo non cambiato: ${String(e)}`);
+      }
+    },
+    [chatId, toast],
+  );
+
+  const duplicateChat = useCallback(
+    async (id: string) => {
+      try {
+        const meta = await call<ChatMetadata>("duplicate_chat", { chatId: id });
+        setChats(await call<ChatMetadata[]>("list_chats"));
+        // Ci si sposta nella copia: e' li' che si voleva cambiare strada.
+        await selectChat(meta.id);
+      } catch (e) {
+        toast("error", `Copia non riuscita: ${String(e)}`);
+      }
+    },
+    [selectChat, toast],
+  );
+
+  const exportChat = useCallback(
+    async (id: string, format: ExportFormat) => {
+      try {
+        const content = await call<string>("export_chat", { chatId: id, format });
+        const name = `${fileNameFor(chats.find((c) => c.id === id)?.title)}.${
+          format === "json" ? "json" : "md"
+        }`;
+
+        if (isDesktop) {
+          const path = await save({
+            defaultPath: name,
+            filters: [
+              format === "json"
+                ? { name: "JSON", extensions: ["json"] }
+                : { name: "Markdown", extensions: ["md"] },
+            ],
+          });
+          if (!path) return;
+          await call("save_export", { path, content });
+          toast("success", `Conversazione esportata in ${path}`);
+          return;
+        }
+
+        // Da browser il file non si scrive sul PC: si scarica.
+        const type = format === "json" ? "application/json" : "text/markdown";
+        const url = URL.createObjectURL(new Blob([content], { type }));
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = name;
+        link.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        toast("error", `Esportazione non riuscita: ${String(e)}`);
+      }
+    },
+    [chats, toast],
   );
 
   const removeChat = useCallback(
@@ -424,6 +535,10 @@ export default function ChatPage() {
         onNewChat={newChat}
         onSelectChat={(id) => void selectChat(id)}
         onDeleteChat={(id) => void removeChat(id)}
+        onRenameChat={(id, newTitle) => void renameChat(id, newTitle)}
+        onDuplicateChat={(id) => void duplicateChat(id)}
+        onExportChat={(id, format) => void exportChat(id, format)}
+        onSearch={searchChats}
         onOpenSettings={() => setSettingsOpen(true)}
       />
 
@@ -439,6 +554,7 @@ export default function ChatPage() {
         onSend={send}
         onStop={stop}
         onRegenerate={regenerate}
+        onEdit={editMessage}
         onError={(text) => toast("error", text)}
       />
 

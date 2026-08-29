@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ChatMetadata } from "../types";
+import type { ChatMatch, ChatMetadata, ExportFormat } from "../types";
 
 interface Props {
   chats: ChatMetadata[];
@@ -9,6 +9,11 @@ interface Props {
   onNewChat: () => void;
   onSelectChat: (id: string) => void;
   onDeleteChat: (id: string) => void;
+  onRenameChat: (id: string, title: string) => void;
+  onDuplicateChat: (id: string) => void;
+  onExportChat: (id: string, format: ExportFormat) => void;
+  /** Cerca dentro le conversazioni: il lavoro lo fa il backend. */
+  onSearch: (query: string) => Promise<ChatMatch[]>;
   onOpenSettings: () => void;
 }
 
@@ -19,6 +24,13 @@ const APP_VERSION = "0.1";
 
 /** Scorciatoia della nuova chat: su Mac si scrive col simbolo del comando. */
 const NEW_CHAT_SHORTCUT = navigator.userAgent.includes("Mac") ? "⌘N" : "Ctrl N";
+
+/**
+ * Attesa prima di cercare. La ricerca rilegge i file delle conversazioni:
+ * farlo a ogni tasto premuto vorrebbe dire rileggerli cinque volte per una
+ * parola di cinque lettere.
+ */
+const SEARCH_DELAY = 200;
 
 /** Raggruppa le conversazioni per quanto sono recenti, come le app di chat. */
 function groupByAge(chats: ChatMetadata[]): Group[] {
@@ -73,17 +85,194 @@ export default function Sidebar({
   onNewChat,
   onSelectChat,
   onDeleteChat,
+  onRenameChat,
+  onDuplicateChat,
+  onExportChat,
+  onSearch,
   onOpenSettings,
 }: Props) {
   const [query, setQuery] = useState("");
-  // Prima conferma dell'eliminazione: il pulsante cambia testo, non apre dialoghi.
+  /** Risultati della ricerca nel contenuto: `null` = nessuna ricerca in corso. */
+  const [matches, setMatches] = useState<ChatMatch[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  /** Chat con il menu delle azioni aperto. */
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  /** Chat in fase di rinomina, con il testo che si sta scrivendo. */
+  const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
+  // Prima conferma dell'eliminazione: la voce cambia testo, non apre dialoghi.
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
-  const groups = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    const filtered = needle ? chats.filter((c) => c.title.toLowerCase().includes(needle)) : chats;
-    return groupByAge(filtered);
-  }, [chats, query]);
+  const renameField = useRef<HTMLInputElement | null>(null);
+
+  // La ricerca parte quando si smette di scrivere. Una risposta che arriva
+  // dopo che la domanda e' cambiata viene buttata: altrimenti l'ultima lenta
+  // sovrascriverebbe la piu' recente.
+  useEffect(() => {
+    const needle = query.trim();
+    if (needle.length === 0) {
+      setMatches(null);
+      setSearching(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSearching(true);
+    const timer = setTimeout(() => {
+      void onSearch(needle)
+        .then((found) => {
+          if (!cancelled) setMatches(found);
+        })
+        .catch(() => {
+          if (!cancelled) setMatches([]);
+        })
+        .finally(() => {
+          if (!cancelled) setSearching(false);
+        });
+    }, SEARCH_DELAY);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [query, onSearch]);
+
+  useEffect(() => {
+    if (renaming) renameField.current?.select();
+  }, [renaming]);
+
+  // Chiudere il menu con Escape: e' li' che la mano va per prima.
+  useEffect(() => {
+    if (!menuFor) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setMenuFor(null);
+        setPendingDelete(null);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menuFor]);
+
+  const groups = useMemo(() => groupByAge(chats), [chats]);
+
+  function closeMenu() {
+    setMenuFor(null);
+    setPendingDelete(null);
+  }
+
+  function confirmRename() {
+    if (!renaming) return;
+    const title = renaming.title.trim();
+    if (title.length > 0) onRenameChat(renaming.id, title);
+    setRenaming(null);
+  }
+
+  /** Una riga della lista, uguale fra risultati e conversazioni recenti. */
+  function row(chat: ChatMetadata, snippet?: string) {
+    const editing = renaming?.id === chat.id;
+    return (
+      <div key={chat.id} className={`chat-item ${chat.id === currentChatId ? "active" : ""}`}>
+        <div className="chat-item-row">
+          <span className="chat-item-dot" aria-hidden="true" />
+
+          {editing ? (
+            <input
+              ref={renameField}
+              className="chat-item-rename"
+              value={renaming.title}
+              aria-label="Nuovo titolo"
+              onChange={(e) => setRenaming({ id: chat.id, title: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  confirmRename();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setRenaming(null);
+                }
+              }}
+              onBlur={confirmRename}
+            />
+          ) : (
+            <button className="chat-item-main" title={chat.title} onClick={() => onSelectChat(chat.id)}>
+              {chat.title}
+            </button>
+          )}
+
+          <span className="chat-item-time">{stamp(chat.updated)}</span>
+
+          <button
+            className={`chat-item-more ${menuFor === chat.id ? "open" : ""}`}
+            aria-label={`Azioni per ${chat.title}`}
+            aria-expanded={menuFor === chat.id}
+            onClick={() => {
+              setPendingDelete(null);
+              setMenuFor((id) => (id === chat.id ? null : chat.id));
+            }}
+          >
+            ⋯
+          </button>
+        </div>
+
+        {snippet && <p className="chat-item-snippet">{snippet}</p>}
+
+        {menuFor === chat.id && (
+          <div className="chat-menu" role="menu">
+            <button
+              role="menuitem"
+              onClick={() => {
+                setRenaming({ id: chat.id, title: chat.title });
+                closeMenu();
+              }}
+            >
+              Rinomina
+            </button>
+            <button
+              role="menuitem"
+              onClick={() => {
+                onDuplicateChat(chat.id);
+                closeMenu();
+              }}
+            >
+              Duplica
+            </button>
+            <button
+              role="menuitem"
+              onClick={() => {
+                onExportChat(chat.id, "markdown");
+                closeMenu();
+              }}
+            >
+              Esporta in Markdown
+            </button>
+            <button
+              role="menuitem"
+              onClick={() => {
+                onExportChat(chat.id, "json");
+                closeMenu();
+              }}
+            >
+              Esporta in JSON
+            </button>
+            <button
+              role="menuitem"
+              className={`danger ${pendingDelete === chat.id ? "confirm" : ""}`}
+              onClick={() => {
+                if (pendingDelete === chat.id) {
+                  onDeleteChat(chat.id);
+                  closeMenu();
+                } else {
+                  setPendingDelete(chat.id);
+                }
+              }}
+            >
+              {pendingDelete === chat.id ? "Sicuro? Elimina" : "Elimina"}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <aside className={`sidebar ${open ? "" : "collapsed"}`} aria-hidden={!open}>
@@ -107,46 +296,37 @@ export default function Sidebar({
         <input
           className="search"
           value={query}
-          placeholder="Cerca"
+          placeholder="Cerca nei messaggi"
           aria-label="Cerca nelle conversazioni"
           onChange={(e) => setQuery(e.target.value)}
         />
+        {query.length > 0 && (
+          <button className="search-clear" aria-label="Annulla la ricerca" onClick={() => setQuery("")}>
+            ✕
+          </button>
+        )}
       </div>
 
       <nav className="chat-list" aria-label="Conversazioni">
-        {groups.length === 0 && (
-          <p className="empty-note">{chats.length === 0 ? "Nessuna conversazione." : "Nessun risultato."}</p>
-        )}
-
-        {groups.map((group) => (
-          <div key={group.label} className="chat-group">
-            <h2 className="group-label">{group.label}</h2>
-            {group.chats.map((chat) => (
-              <div key={chat.id} className={`chat-item ${chat.id === currentChatId ? "active" : ""}`}>
-                <span className="chat-item-dot" aria-hidden="true" />
-                <button className="chat-item-main" title={chat.title} onClick={() => onSelectChat(chat.id)}>
-                  {chat.title}
-                </button>
-                <span className="chat-item-time">{stamp(chat.updated)}</span>
-                <button
-                  className={`chat-item-del ${pendingDelete === chat.id ? "confirm" : ""}`}
-                  aria-label={`Elimina ${chat.title}`}
-                  onClick={() => {
-                    if (pendingDelete === chat.id) {
-                      onDeleteChat(chat.id);
-                      setPendingDelete(null);
-                    } else {
-                      setPendingDelete(chat.id);
-                    }
-                  }}
-                  onBlur={() => setPendingDelete((id) => (id === chat.id ? null : id))}
-                >
-                  {pendingDelete === chat.id ? "Sicuro?" : "✕"}
-                </button>
+        {matches !== null ? (
+          <div className="chat-group">
+            <h2 className="group-label">
+              {searching ? "Cerco..." : `Risultati (${matches.length})`}
+            </h2>
+            {!searching && matches.length === 0 && <p className="empty-note">Nessun risultato.</p>}
+            {matches.map((match) => row(match, match.snippet))}
+          </div>
+        ) : (
+          <>
+            {groups.length === 0 && <p className="empty-note">Nessuna conversazione.</p>}
+            {groups.map((group) => (
+              <div key={group.label} className="chat-group">
+                <h2 className="group-label">{group.label}</h2>
+                {group.chats.map((chat) => row(chat))}
               </div>
             ))}
-          </div>
-        ))}
+          </>
+        )}
       </nav>
 
       <button className="sidebar-foot" onClick={onOpenSettings}>

@@ -65,6 +65,18 @@ export interface StoredChat extends ChatMetadata {
   messages: ChatMessage[];
 }
 
+/** Conversazione trovata dalla ricerca, col pezzo di testo che l'ha fatta
+ *  comparire. */
+export interface ChatMatch extends ChatMetadata {
+  /** Vuoto quando la corrispondenza sta solo nel titolo. */
+  snippet: string;
+  /** In quanti messaggi compare il testo cercato. */
+  hits: number;
+}
+
+/** Formati in cui una conversazione si porta fuori dall'app. */
+export type ExportFormat = "markdown" | "json";
+
 export interface ChatTurn {
   role: ChatRole;
   content: string;

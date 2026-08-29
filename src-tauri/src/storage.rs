@@ -51,6 +51,19 @@ pub struct ChatMetadata {
     pub message_count: usize,
 }
 
+/// Una conversazione in cui il testo cercato compare, con il pezzo di
+/// messaggio da mostrare sotto il titolo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMatch {
+    #[serde(flatten)]
+    pub metadata: ChatMetadata,
+    /// Il primo punto in cui compare, con qualche parola intorno. Vuoto
+    /// quando la corrispondenza sta solo nel titolo.
+    pub snippet: String,
+    /// In quanti messaggi compare: distingue un accenno da un discorso.
+    pub hits: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredChat {
     #[serde(flatten)]
@@ -225,6 +238,215 @@ pub fn list_chats() -> Result<Vec<ChatMetadata>, String> {
     Ok(out)
 }
 
+/// Cambia il titolo senza toccare altro. La data di aggiornamento resta
+/// quella dell'ultimo messaggio: rinominare una conversazione vecchia non
+/// deve farla risalire in cima alla lista.
+pub fn rename_chat(chat_id: &str, title: &str) -> Result<ChatMetadata, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("Il titolo non puo' essere vuoto.".to_string());
+    }
+    if title.chars().count() > MAX_TITLE_CHARS {
+        return Err(format!("Il titolo non puo' superare {MAX_TITLE_CHARS} caratteri."));
+    }
+
+    let mut chat = load_chat(chat_id)?;
+    chat.metadata.title = title.to_string();
+    chat.metadata.message_count = chat.messages.len();
+    write_json(&chat_path(chat_id)?, &chat)?;
+    Ok(chat.metadata)
+}
+
+/// Titolo lungo quanto una frase, non quanto un messaggio.
+const MAX_TITLE_CHARS: usize = 120;
+
+/// Copia una conversazione in una nuova, con i suoi messaggi. Serve per
+/// ripartire da un punto senza perdere il filo di prima: si duplica, e nella
+/// copia si cambia strada.
+pub fn duplicate_chat(chat_id: &str) -> Result<ChatMetadata, String> {
+    let source = load_chat(chat_id)?;
+    let now = Utc::now();
+
+    let copy = StoredChat {
+        metadata: ChatMetadata {
+            id: new_chat_id(),
+            title: format!("{} (copia)", source.metadata.title),
+            created: now.to_rfc3339(),
+            updated: now.to_rfc3339(),
+            message_count: source.messages.len(),
+        },
+        messages: source.messages,
+    };
+    save_chat(&copy)?;
+    load_chat(&copy.metadata.id).map(|c| c.metadata)
+}
+
+/// Un id come quello che genera il frontend: data leggibile piu' quattro
+/// caratteri a caso, perche' due copie fatte nello stesso secondo non si
+/// sovrascrivano.
+fn new_chat_id() -> String {
+    use rand::Rng as _;
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::thread_rng();
+    let tail: String =
+        (0..4).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect();
+    format!("{}_{tail}", Utc::now().format("%Y%m%d_%H%M%S"))
+}
+
+/// La conversazione in un file da tenere fuori dall'app: Markdown per
+/// leggerla, JSON per riaverla intera. Torna il testo, non lo scrive: dove
+/// salvarlo lo decide chi ha chiesto l'esportazione.
+pub fn export_chat(chat_id: &str, format: &str) -> Result<String, String> {
+    let chat = load_chat(chat_id)?;
+    match format {
+        "json" => serde_json::to_string_pretty(&chat).map_err(|e| format!("Esportazione fallita: {e}")),
+        "markdown" => Ok(as_markdown(&chat)),
+        other => Err(format!("Formato non riconosciuto: '{other}'")),
+    }
+}
+
+fn as_markdown(chat: &StoredChat) -> String {
+    let mut out = format!("# {}\n\n", chat.metadata.title);
+    out.push_str(&format!("*Conversazione con Logica, {}*\n", human_date(&chat.metadata.created)));
+
+    for message in &chat.messages {
+        let who = match message.role.as_str() {
+            "user" => "Io",
+            _ if message.message_type == "notification" => "Nota dell'app",
+            _ => "Logica",
+        };
+        out.push_str(&format!("\n## {who}\n\n"));
+
+        if let Some(files) = &message.attachments {
+            for file in files {
+                let note = match (&file.error, file.kind) {
+                    (Some(e), _) => format!(" (non letto: {e})"),
+                    (None, crate::attachments::Kind::Image) => " (immagine)".to_string(),
+                    _ => String::new(),
+                };
+                out.push_str(&format!("*Allegato: {}{note}*\n", file.name));
+            }
+            if !files.is_empty() {
+                out.push('\n');
+            }
+        }
+
+        out.push_str(message.content.trim());
+        out.push('\n');
+
+        if let Some(sources) = &message.sources {
+            if !sources.is_empty() {
+                out.push_str("\nFonti:\n");
+                for source in sources {
+                    let title = if source.title.trim().is_empty() { &source.url } else { &source.title };
+                    out.push_str(&format!("- [{title}]({})\n", source.url));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Data in italiano per l'intestazione dell'esportazione. Se la data salvata
+/// non si legge, si lascia com'e': meglio di una data finta.
+fn human_date(iso: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(iso) {
+        Ok(date) => date.format("%d/%m/%Y").to_string(),
+        Err(_) => iso.to_string(),
+    }
+}
+
+/* -------------------------------- ricerca --------------------------------- */
+
+/// Parole intorno alla corrispondenza mostrate nell'anteprima.
+const SNIPPET_CONTEXT: usize = 60;
+
+/// Risultati oltre i quali la lista non aiuta piu': si restringe la ricerca.
+const MAX_MATCHES: usize = 50;
+
+/// Cerca dentro le conversazioni, non solo nei titoli: il titolo lo scrive il
+/// modello in cinque parole, quello che si ricorda e' una frase detta dentro.
+///
+/// Confronto in minuscolo, sottostringa secca: chi cerca "fattur" trova
+/// "fatturazione". Niente accenti normalizzati e niente parole staccate,
+/// perche' una ricerca che indovina troppo non si capisce piu' perche' abbia
+/// trovato una cosa.
+pub fn search_chats(query: &str) -> Result<Vec<ChatMatch>, String> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    ensure_layout()?;
+    let dir = chats_dir()?;
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(chat) = read_json::<StoredChat>(&path) else { continue };
+
+        let mut hits = 0usize;
+        let mut snippet = String::new();
+        for message in &chat.messages {
+            if !message.content.to_lowercase().contains(&needle) {
+                continue;
+            }
+            hits += 1;
+            if snippet.is_empty() {
+                snippet = snippet_around(&message.content, &needle);
+            }
+        }
+
+        let in_title = chat.metadata.title.to_lowercase().contains(&needle);
+        if hits == 0 && !in_title {
+            continue;
+        }
+
+        let mut meta = chat.metadata;
+        meta.message_count = chat.messages.len();
+        out.push(ChatMatch { metadata: meta, snippet, hits });
+    }
+
+    out.sort_by(|a, b| b.metadata.updated.cmp(&a.metadata.updated));
+    out.truncate(MAX_MATCHES);
+    Ok(out)
+}
+
+/// Il testo intorno alla prima occorrenza, su una riga sola. Gli a capo
+/// diventano spazi: in due righe di anteprima contano le parole, non
+/// l'impaginazione di quello che era un blocco di codice.
+fn snippet_around(content: &str, needle: &str) -> String {
+    let flat: Vec<char> = content.split_whitespace().collect::<Vec<_>>().join(" ").chars().collect();
+    let lower: String = flat.iter().collect::<String>().to_lowercase();
+
+    // Posizione in caratteri, non in byte: i tagli devono cadere fra lettere
+    // intere anche quando ci sono accenti o emoji.
+    let start_char = match lower.find(needle) {
+        Some(byte_index) => lower[..byte_index].chars().count(),
+        None => 0,
+    };
+
+    let from = start_char.saturating_sub(SNIPPET_CONTEXT);
+    let to = (start_char + needle.chars().count() + SNIPPET_CONTEXT).min(flat.len());
+
+    let mut snippet = String::new();
+    if from > 0 {
+        snippet.push('…');
+    }
+    snippet.extend(flat[from..to].iter());
+    if to < flat.len() {
+        snippet.push('…');
+    }
+    snippet
+}
+
 /* ----------------------------- config e preferenze ---------------------------- */
 
 pub fn load_preferences() -> Preferences {
@@ -337,6 +559,129 @@ pub(crate) mod tests {
 
         save_config(&Config { profile: "developer".to_string(), ..Config::default() }).expect("config");
         assert_eq!(load_config().profile, "developer");
+    }
+
+    /// Chat con messaggi scritti a mano, per cercarci dentro.
+    fn chat_with(id: &str, title: &str, texts: &[&str]) -> StoredChat {
+        let mut chat = sample_chat(id, title);
+        chat.messages = texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| ChatMessage {
+                id: format!("m{i}"),
+                role: if i % 2 == 0 { "user" } else { "ai" }.to_string(),
+                content: (*text).to_string(),
+                timestamp: "2026-08-29T10:00:00Z".to_string(),
+                message_type: "text".to_string(),
+                attachments: None,
+                sources: None,
+            })
+            .collect();
+        chat
+    }
+
+    #[test]
+    fn search_looks_inside_the_messages() {
+        let _home = TempHome::new("ricerca");
+        ensure_layout().expect("layout");
+
+        save_chat(&chat_with(
+            "20260829_100000_aaaa",
+            "Conti di casa",
+            &["quanto costa la caldaia?", "Dipende dal modello: una a condensazione parte da 1200 euro."],
+        ))
+        .expect("salvataggio");
+        save_chat(&chat_with("20260829_110000_bbbb", "Caldaia nel titolo", &["ciao"]))
+            .expect("salvataggio");
+        save_chat(&chat_with("20260829_120000_cccc", "Altro", &["parliamo di vacanze"]))
+            .expect("salvataggio");
+
+        let found = search_chats("caldaia").expect("ricerca");
+        let ids: Vec<&str> = found.iter().map(|m| m.metadata.id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "trovate: {ids:?}");
+        assert!(ids.contains(&"20260829_100000_aaaa"));
+        // Il titolo conta quanto il contenuto, anche senza corrispondenze dentro.
+        assert!(ids.contains(&"20260829_110000_bbbb"));
+
+        let dentro = found.iter().find(|m| m.metadata.id == "20260829_100000_aaaa").expect("chat");
+        assert_eq!(dentro.hits, 1);
+        assert!(dentro.snippet.contains("caldaia"), "anteprima: {}", dentro.snippet);
+
+        let solo_titolo = found.iter().find(|m| m.metadata.id == "20260829_110000_bbbb").expect("chat");
+        assert_eq!(solo_titolo.hits, 0);
+        assert_eq!(solo_titolo.snippet, "");
+
+        // Maiuscole e minuscole non contano, una parola assente non trova niente.
+        assert_eq!(search_chats("CALDAIA").expect("ricerca").len(), 2);
+        assert!(search_chats("bicicletta").expect("ricerca").is_empty());
+        assert!(search_chats("   ").expect("ricerca").is_empty());
+    }
+
+    #[test]
+    fn the_snippet_shows_the_words_around_the_match() {
+        let prima = "a ".repeat(100);
+        let content = format!("{prima}parolachiave e poi il resto del discorso");
+        let snippet = snippet_around(&content, "parolachiave");
+
+        assert!(snippet.starts_with('…'), "manca il taglio a sinistra: {snippet}");
+        assert!(snippet.contains("parolachiave"));
+        // Il contesto e' limitato: non torna tutto il messaggio.
+        assert!(snippet.chars().count() < content.chars().count());
+    }
+
+    #[test]
+    fn renaming_keeps_the_place_in_the_list() {
+        let _home = TempHome::new("rinomina");
+        ensure_layout().expect("layout");
+        save_chat(&sample_chat("20260829_100000_aaaa", "senza nome")).expect("salvataggio");
+
+        let prima = load_chat("20260829_100000_aaaa").expect("lettura").metadata.updated;
+        let meta = rename_chat("20260829_100000_aaaa", "  Conti di casa  ").expect("rinomina");
+
+        assert_eq!(meta.title, "Conti di casa");
+        assert_eq!(load_chat("20260829_100000_aaaa").expect("lettura").metadata.title, "Conti di casa");
+        // Rinominare non e' un aggiornamento: la chat non risale in cima.
+        assert_eq!(load_chat("20260829_100000_aaaa").expect("lettura").metadata.updated, prima);
+
+        assert!(rename_chat("20260829_100000_aaaa", "   ").is_err());
+    }
+
+    #[test]
+    fn duplicating_leaves_the_original_alone() {
+        let _home = TempHome::new("duplica");
+        ensure_layout().expect("layout");
+        save_chat(&chat_with("20260829_100000_aaaa", "Progetto", &["primo", "secondo"]))
+            .expect("salvataggio");
+
+        let copy = duplicate_chat("20260829_100000_aaaa").expect("duplicazione");
+        assert_eq!(copy.title, "Progetto (copia)");
+        assert_ne!(copy.id, "20260829_100000_aaaa");
+        assert_eq!(copy.message_count, 2);
+
+        let copied = load_chat(&copy.id).expect("lettura copia");
+        assert_eq!(copied.messages.len(), 2);
+        assert_eq!(copied.messages[0].content, "primo");
+        // L'originale resta dov'era, con il suo titolo.
+        assert_eq!(load_chat("20260829_100000_aaaa").expect("lettura").metadata.title, "Progetto");
+    }
+
+    #[test]
+    fn export_writes_markdown_and_json() {
+        let _home = TempHome::new("esporta");
+        ensure_layout().expect("layout");
+        save_chat(&chat_with("20260829_100000_aaaa", "Caldaia", &["quanto costa?", "1200 euro."]))
+            .expect("salvataggio");
+
+        let markdown = export_chat("20260829_100000_aaaa", "markdown").expect("markdown");
+        assert!(markdown.starts_with("# Caldaia"));
+        assert!(markdown.contains("## Io\n\nquanto costa?"));
+        assert!(markdown.contains("## Logica\n\n1200 euro."));
+
+        let json = export_chat("20260829_100000_aaaa", "json").expect("json");
+        let back: StoredChat = serde_json::from_str(&json).expect("json rileggibile");
+        assert_eq!(back.messages.len(), 2);
+
+        assert!(export_chat("20260829_100000_aaaa", "pdf").is_err());
     }
 
     #[test]
