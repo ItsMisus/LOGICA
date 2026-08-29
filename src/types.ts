@@ -3,68 +3,29 @@
  * rispecchiano 1:1 le struct Rust (serde serializza i campi come dichiarati).
  */
 
-export interface FileInfo {
-  name: string;
-  path: string;
-  extension: string;
-  size: number;
-  modified: string;
-  relative_path: string;
-  depth: number;
-  content_preview: string | null;
-}
-
-/** Albero di cartelle annidate: { "Documenti": { "PDF": {} }, "Immagini": {} } */
-export interface SchemaNode {
-  [folder: string]: SchemaNode;
-}
-
-export interface Rule {
-  pattern: string;
-  destination: string;
-}
-
-/** Criterio di destinazione: per tipo (usa le regole) o sui metadati. */
-export type Grouping = "extension" | "year" | "month" | "source_folder";
-
-export interface OrganizationProposal {
-  schema: SchemaNode;
-  rules: Rule[];
-  rationale: string;
-  /** Chi l'ha prodotta: "ollama" | "claude" | "fallback" | "logica" */
-  source: string;
-  grouping: Grouping;
-}
-
-export interface Move {
-  source: string;
-  destination: string;
-  relative_destination: string;
-}
-
-/** Riassunto dei piani di spostamento, mostrato nel blocco proposta. */
-export interface PlanPreview {
-  roots: string[];
-  total_moves: number;
-  new_folders: number;
-  conflicts: number;
-  unmatched: number;
-  warnings: string[];
-  sample: Move[];
-}
-
-export interface ApplyResult {
-  status: string;
-  files_moved: number;
-  folders_created: number;
-  errors: string[];
-  undo_available: boolean;
-}
-
 /* ---------------------------------- chat ---------------------------------- */
 
+/** File allegato a un messaggio: il testo lo legge il backend. */
+export interface Attachment {
+  name: string;
+  path: string;
+  size: number;
+  /** Contenuto testuale gia' tagliato; null se il file non e' leggibile. */
+  text: string | null;
+  truncated: boolean;
+  /** Perche' il file non e' stato letto, pronto da mostrare. */
+  error: string | null;
+}
+
+/** Una pagina letta su internet, mostrata come fonte sotto la risposta. */
+export interface WebSource {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
 export type ChatRole = "user" | "ai";
-export type ChatMessageType = "text" | "proposal_block" | "notification";
+export type ChatMessageType = "text" | "notification";
 
 export interface ChatMessage {
   id: string;
@@ -72,7 +33,9 @@ export interface ChatMessage {
   content: string;
   timestamp: string;
   type: ChatMessageType;
-  proposalData?: OrganizationProposal;
+  attachments?: Attachment[];
+  /** Pagine consultate su internet per scrivere questa risposta. */
+  sources?: WebSource[];
 }
 
 export interface ChatMetadata {
@@ -80,16 +43,11 @@ export interface ChatMetadata {
   title: string;
   created: string;
   updated: string;
-  folders: string[];
   message_count: number;
-  files_moved: number;
-  folders_created: number;
-  applied_on: string | null;
 }
 
 export interface StoredChat extends ChatMetadata {
   messages: ChatMessage[];
-  final_proposal?: OrganizationProposal;
 }
 
 export interface ChatTurn {
@@ -97,25 +55,26 @@ export interface ChatTurn {
   content: string;
 }
 
-/** Cosa ha fatto LOGICA in risposta all'ultimo messaggio. */
-export type ChatIntent =
-  | "chat"
-  | "scanned"
-  | "proposal"
-  | "applied"
-  | "undone"
-  | "cancelled"
-  | "error";
-
-export interface ChatReply {
-  response: string;
-  intent: ChatIntent;
-  proposal: OrganizationProposal | null;
-  preview: PlanPreview | null;
-  apply_result: ApplyResult | null;
-  folders: string[];
-  file_count: number;
+/** Esito di un turno di conversazione (comando `talk`). */
+export interface TalkReply {
+  text: string;
+  /** L'utente ha premuto "Interrompi": il testo e' parziale ma si tiene. */
+  stopped: boolean;
   error: string | null;
+  sources: WebSource[];
+}
+
+/** Pezzo di risposta in arrivo durante lo streaming (evento `assistant-delta`). */
+export interface AssistantDelta {
+  chat_id: string;
+  text: string;
+}
+
+/** Cosa sta facendo l'app prima di scrivere (evento `assistant-status`):
+ *  la ricerca in corso, la pagina che sta leggendo. */
+export interface AssistantStatus {
+  chat_id: string;
+  text: string;
 }
 
 /* ------------------------------ configurazione ----------------------------- */
@@ -125,6 +84,8 @@ export interface Preferences {
   use_premium_ai: boolean;
   ollama_url: string;
   ollama_model: string;
+  /** L'assistente puo' cercare su internet quando la risposta lo richiede. */
+  web_search: boolean;
 }
 
 export interface Config {
@@ -140,23 +101,13 @@ export interface AiConfig {
   ollama_url: string;
   ollama_model: string;
   user_preferences: string;
+  web_search: boolean;
 }
 
 export interface AiStatus {
   ollama: boolean;
   claude: boolean;
   models: string[];
-}
-
-export interface ScanProgress {
-  scanned: number;
-  current: string;
-}
-
-export interface ApplyProgress {
-  done: number;
-  total: number;
-  current: string;
 }
 
 export interface Toast {
@@ -169,7 +120,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
   theme: "dark",
   use_premium_ai: false,
   ollama_url: "http://localhost:11434",
-  ollama_model: "mistral",
+  ollama_model: "llama3.1:8b",
+  web_search: true,
 };
 
 export const DEFAULT_CONFIG: Config = {
@@ -178,13 +130,21 @@ export const DEFAULT_CONFIG: Config = {
   user_preferences: "",
 };
 
-/** Profili pronti: testo di preferenze passato all'AI. */
-export const PROFILES: Record<string, string> = {
-  developer:
-    "Sono uno sviluppatore: tieni insieme codice, script e configurazioni; separa i progetti dagli archivi.",
-  media:
-    "Uso il PC soprattutto per foto e video: privilegia cartelle per tipo di media e per data.",
-  office:
-    "Lavoro con documenti d'ufficio: separa fatture, contratti, presentazioni e fogli di calcolo.",
-  custom: "",
-};
+/** Lunghezza minima della password per l'accesso da browser. Deve restare
+ *  allineata a `MIN_PASSWORD_LEN` in `src-tauri/src/server/auth.rs`. */
+export const MIN_PASSWORD_LEN = 12;
+
+/** Stato del server web, come lo riporta il backend. */
+export interface ServerStatus {
+  running: boolean;
+  /** Indirizzo da aprire sull'altro PC, quando e' acceso. */
+  url: string | null;
+  /** Impronta SHA-256 del certificato, da confrontare con quella del browser. */
+  fingerprint: string | null;
+  port: number;
+  exposeToLan: boolean;
+  autostart: boolean;
+  hasPassword: boolean;
+  /** Cartelle entro cui il browser puo' lavorare. Vuota = niente. */
+  allowedFolders: string[];
+}

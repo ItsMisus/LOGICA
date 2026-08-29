@@ -14,11 +14,8 @@ function ToastRow({ toast, onDismiss }: { toast: Toast; onDismiss: (id: string) 
     return () => clearTimeout(id);
   }, [toast.id, onDismiss]);
 
-  const icon = toast.kind === "success" ? "✅" : toast.kind === "error" ? "⚠️" : "ℹ️";
-
   return (
     <div className={`toast ${toast.kind}`} role="status">
-      <span aria-hidden="true">{icon}</span>
       <p>{toast.message}</p>
       <button className="btn ghost tiny" onClick={() => onDismiss(toast.id)} aria-label="Chiudi notifica">
         ✕

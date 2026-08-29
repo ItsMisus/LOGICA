@@ -1,11 +1,10 @@
-//! Persistenza su disco in `~/.logica/`: chat, preferenze, log delle
-//! operazioni per l'undo. Tutto JSON leggibile a mano.
+//! Persistenza su disco in `~/.logica/`: chat e preferenze. Tutto JSON
+//! leggibile a mano.
 //!
 //! ```text
 //! ~/.logica/
-//! |- config.json          cartelle monitorate + profilo
+//! |- config.json          cartelle consentite + profilo
 //! |- preferences.json     tema, motore AI, modello
-//! |- operations_log.json  storico spostamenti (per l'undo)
 //! `- chats/chat_<id>.json una conversazione per file
 //! ```
 
@@ -15,12 +14,8 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::ai_analyzer::{OrganizationProposal, DEFAULT_OLLAMA_URL};
-use crate::file_operations::UndoLog;
-
-/// Oltre questa soglia il log delle operazioni viene troncato: serve per
-/// l'undo recente, non come archivio storico.
-const MAX_OPERATIONS: usize = 50;
+use crate::ai::DEFAULT_OLLAMA_URL;
+use crate::attachments::Attachment;
 
 /* ---------------------------------- tipi ---------------------------------- */
 
@@ -31,11 +26,15 @@ pub struct ChatMessage {
     pub role: String,
     pub content: String,
     pub timestamp: String,
-    /// "text" | "proposal_block" | "notification"
+    /// "text" | "notification"
     #[serde(rename = "type", default = "default_message_type")]
     pub message_type: String,
-    #[serde(default, rename = "proposalData", skip_serializing_if = "Option::is_none")]
-    pub proposal_data: Option<OrganizationProposal>,
+    /// File allegati al messaggio dall'utente, con il testo gia' letto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<Attachment>>,
+    /// Pagine consultate su internet per scrivere questa risposta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<Vec<crate::web::SearchHit>>,
 }
 
 fn default_message_type() -> String {
@@ -49,15 +48,7 @@ pub struct ChatMetadata {
     pub created: String,
     pub updated: String,
     #[serde(default)]
-    pub folders: Vec<String>,
-    #[serde(default)]
     pub message_count: usize,
-    #[serde(default)]
-    pub files_moved: usize,
-    #[serde(default)]
-    pub folders_created: usize,
-    #[serde(default)]
-    pub applied_on: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,8 +57,6 @@ pub struct StoredChat {
     pub metadata: ChatMetadata,
     #[serde(default)]
     pub messages: Vec<ChatMessage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_proposal: Option<OrganizationProposal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +66,14 @@ pub struct Preferences {
     pub use_premium_ai: bool,
     pub ollama_url: String,
     pub ollama_model: String,
+    /// L'assistente puo' cercare su internet. Il campo manca nei file scritti
+    /// dalle versioni precedenti: li' vale acceso.
+    #[serde(default = "enabled")]
+    pub web_search: bool,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 impl Default for Preferences {
@@ -85,7 +82,8 @@ impl Default for Preferences {
             theme: "dark".to_string(),
             use_premium_ai: false,
             ollama_url: DEFAULT_OLLAMA_URL.to_string(),
-            ollama_model: "mistral".to_string(),
+            ollama_model: "llama3.1:8b".to_string(),
+            web_search: true,
         }
     }
 }
@@ -100,22 +98,6 @@ pub struct Config {
     /// Preferenze scritte a mano dall'utente, passate all'AI.
     #[serde(default)]
     pub user_preferences: String,
-}
-
-/// Una applicazione andata a buon fine, con tutto il necessario per annullarla.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Operation {
-    pub undo_token: String,
-    pub chat_id: String,
-    pub timestamp: String,
-    pub files_moved: usize,
-    pub logs: Vec<UndoLog>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct OperationsFile {
-    #[serde(default)]
-    operations: Vec<Operation>,
 }
 
 /* -------------------------------- percorsi -------------------------------- */
@@ -265,58 +247,8 @@ pub fn save_config(config: &Config) -> Result<(), String> {
     write_json(&logica_dir()?.join("config.json"), config)
 }
 
-/* ------------------------------- log operazioni ------------------------------ */
-
-fn operations_path() -> Result<PathBuf, String> {
-    Ok(logica_dir()?.join("operations_log.json"))
-}
-
-fn read_operations() -> OperationsFile {
-    operations_path()
-        .and_then(|p| read_json::<OperationsFile>(&p))
-        .unwrap_or_default()
-}
-
-/// Registra un'applicazione e ritorna il token da usare per annullarla.
-pub fn push_operation(chat_id: &str, files_moved: usize, logs: Vec<UndoLog>) -> Result<String, String> {
-    ensure_layout()?;
-    let timestamp = Utc::now();
-    let undo_token = format!("undo_{}", timestamp.format("%Y%m%d_%H%M%S%3f"));
-    let mut file = read_operations();
-    file.operations.push(Operation {
-        undo_token: undo_token.clone(),
-        chat_id: chat_id.to_string(),
-        timestamp: timestamp.to_rfc3339(),
-        files_moved,
-        logs,
-    });
-    if file.operations.len() > MAX_OPERATIONS {
-        let excess = file.operations.len() - MAX_OPERATIONS;
-        file.operations.drain(0..excess);
-    }
-    write_json(&operations_path()?, &file)?;
-    Ok(undo_token)
-}
-
-/// Estrae (e rimuove dal log) l'ultima operazione della chat indicata.
-pub fn take_last_operation(chat_id: &str) -> Result<Option<Operation>, String> {
-    let mut file = read_operations();
-    let index = file.operations.iter().rposition(|o| o.chat_id == chat_id);
-    let op = match index {
-        Some(i) => file.operations.remove(i),
-        None => return Ok(None),
-    };
-    write_json(&operations_path()?, &file)?;
-    Ok(Some(op))
-}
-
-/// True se la chat ha un'operazione annullabile (serve alla UI per il bottone).
-pub fn has_undoable_operation(chat_id: &str) -> bool {
-    read_operations().operations.iter().any(|o| o.chat_id == chat_id)
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// La home e' una variabile d'ambiente di processo: i test che la
@@ -324,10 +256,10 @@ mod tests {
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Sposta ~/.logica in una cartella usa-e-getta per la durata del test.
-    struct TempHome(PathBuf, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    pub(crate) struct TempHome(PathBuf, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
 
     impl TempHome {
-        fn new(tag: &str) -> Self {
+        pub(crate) fn new(tag: &str) -> Self {
             // Un test andato in panic avvelena il lock ma non rompe gli altri.
             let guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let nanos = std::time::SystemTime::now()
@@ -355,21 +287,17 @@ mod tests {
                 title: title.to_string(),
                 created: "2026-08-29T10:00:00Z".to_string(),
                 updated: "2026-08-29T10:00:00Z".to_string(),
-                folders: vec!["C:/tmp".to_string()],
                 message_count: 0,
-                files_moved: 12,
-                folders_created: 3,
-                applied_on: Some("2026-08-29T10:05:00Z".to_string()),
             },
             messages: vec![ChatMessage {
                 id: "m1".to_string(),
                 role: "user".to_string(),
-                content: "organizza Downloads".to_string(),
+                content: "ciao".to_string(),
                 timestamp: "2026-08-29T10:00:00Z".to_string(),
                 message_type: "text".to_string(),
-                proposal_data: None,
+                attachments: None,
+                sources: None,
             }],
-            final_proposal: None,
         }
     }
 
@@ -394,27 +322,6 @@ mod tests {
         assert_eq!(list_chats().expect("elenco").len(), 1);
         // Eliminare una chat che non c'e' piu' non e' un errore.
         delete_chat("20260829_100000_aaaa").expect("eliminazione idempotente");
-    }
-
-    #[test]
-    fn operations_are_popped_per_chat() {
-        let _home = TempHome::new("ops");
-        ensure_layout().expect("layout");
-
-        assert!(!has_undoable_operation("chat_a"));
-        push_operation("chat_a", 5, vec![UndoLog::default()]).expect("log");
-        push_operation("chat_b", 9, vec![UndoLog::default()]).expect("log");
-        push_operation("chat_a", 7, vec![UndoLog::default()]).expect("log");
-
-        // Si annulla sempre l'ultima operazione di quella chat, non della b.
-        let last = take_last_operation("chat_a").expect("lettura").expect("operazione");
-        assert_eq!(last.files_moved, 7);
-        assert!(last.undo_token.starts_with("undo_"));
-
-        let previous = take_last_operation("chat_a").expect("lettura").expect("operazione");
-        assert_eq!(previous.files_moved, 5);
-        assert!(take_last_operation("chat_a").expect("lettura").is_none());
-        assert!(has_undoable_operation("chat_b"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 [package]
 name = "file-organizer-ai"
 version = "0.1.0"
-description = "LOGICA: organizza i file chiacchierando con un AI locale (Ollama) o Claude API"
+description = "LOGICA: assistente personale con AI locale (Ollama) o Claude API"
 edition = "2021"
 rust-version = "1.77"
 
@@ -13,13 +13,30 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-walkdir = "2"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
 chrono = "0.4"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs", "limit", "set-header"] }
+rcgen = "0.13"
+argon2 = "0.5"
+rand = "0.8"
+subtle = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+axum-server = { version = "0.7.3", default-features = false, features = ["tls-rustls-no-provider"] }
+sha2 = "0.10"
+async-stream = "0.3"
+base64 = "0.22"
+encoding_rs = "0.8"
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
+pdf-extract = "0.12"
 
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }

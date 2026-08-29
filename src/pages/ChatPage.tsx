@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { call, subscribe } from "../api";
 
-import ChatInterface from "../components/ChatInterface";
+import ChatView from "../components/ChatView";
 import NotificationToast from "../components/NotificationToast";
 import Sidebar from "../components/Sidebar";
 import SettingsModal from "../components/SettingsModal";
@@ -12,23 +10,19 @@ import {
   DEFAULT_CONFIG,
   DEFAULT_PREFERENCES,
   type AiStatus,
-  type ApplyProgress,
-  type ApplyResult,
+  type Attachment,
+  type AssistantDelta,
+  type AssistantStatus,
   type ChatMessage,
   type ChatMetadata,
-  type ChatReply,
   type ChatTurn,
   type Config,
-  type OrganizationProposal,
-  type PlanPreview,
   type Preferences,
-  type ScanProgress,
   type StoredChat,
+  type TalkReply,
   type Toast,
+  type WebSource,
 } from "../types";
-
-const GREETING =
-  "Ciao, sono Logica. Dimmi quale cartella vuoi sistemare (per esempio “organizza Downloads”) e ci penso io: prima ti mostro cosa farei, poi sposto solo se sei d'accordo.";
 
 let idCounter = 0;
 function newId(prefix: string): string {
@@ -46,14 +40,32 @@ function newChatId(): string {
   return `${stamp}_${Math.random().toString(36).slice(2, 6)}`;
 }
 
-function message(
-  role: ChatMessage["role"],
-  content: string,
-  type: ChatMessage["type"] = "text",
-  proposalData?: OrganizationProposal,
-): ChatMessage {
-  return { id: newId("m"), role, content, timestamp: new Date().toISOString(), type, proposalData };
+function message(role: ChatMessage["role"], content: string, type: ChatMessage["type"] = "text"): ChatMessage {
+  return { id: newId("m"), role, content, timestamp: new Date().toISOString(), type };
 }
+
+/**
+ * Cosa vede il modello di un messaggio: il testo scritto piu' il contenuto dei
+ * file allegati. Nella chat gli allegati restano una riga di etichette, cosi'
+ * la conversazione non si riempie di dump.
+ */
+function promptContent(m: ChatMessage): string {
+  if (!m.attachments || m.attachments.length === 0) return m.content;
+  const blocks = m.attachments.map((a) => {
+    if (a.text === null) return `--- allegato: ${a.name} (non letto: ${a.error ?? "motivo ignoto"}) ---`;
+    const tail = a.truncated ? "\n[...contenuto troncato]" : "";
+    return `--- allegato: ${a.name} ---\n${a.text}${tail}`;
+  });
+  return [m.content, ...blocks].filter((part) => part.length > 0).join("\n\n");
+}
+
+/** Titolo di ripiego, finche' il modello non ne propone uno migliore. */
+function titleFrom(text: string): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean.length > 48 ? `${clean.slice(0, 48)}...` : clean;
+}
+
+const UNTITLED = "Nuova chat";
 
 export default function ChatPage() {
   const [preferences, setPreferences] = useState<Preferences>(DEFAULT_PREFERENCES);
@@ -62,30 +74,26 @@ export default function ChatPage() {
 
   const [chats, setChats] = useState<ChatMetadata[]>([]);
   const [chatId, setChatId] = useState<string>(newChatId);
-  const [created] = useState<string>(() => new Date().toISOString());
-  const [title, setTitle] = useState("Nuova chat");
-  const [messages, setMessages] = useState<ChatMessage[]>([message("ai", GREETING)]);
+  const [created, setCreated] = useState<string>(() => new Date().toISOString());
+  const [title, setTitle] = useState(UNTITLED);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
 
-  const [proposal, setProposal] = useState<OrganizationProposal | null>(null);
-  const [activeProposalId, setActiveProposalId] = useState<string | null>(null);
-  const [preview, setPreview] = useState<PlanPreview | null>(null);
+  /** Testo in arrivo dal modello: vive fuori da `messages` finche' non finisce. */
+  const [streamingText, setStreamingText] = useState<string | null>(null);
+  const [waiting, setWaiting] = useState(false);
+  /** Cosa sta facendo l'app prima di rispondere: la ricerca, la pagina aperta. */
+  const [statusText, setStatusText] = useState<string | null>(null);
 
-  const [folders, setFolders] = useState<string[]>([]);
-  const [fileCount, setFileCount] = useState(0);
-  const [filesMoved, setFilesMoved] = useState(0);
-  const [foldersCreated, setFoldersCreated] = useState(0);
-  const [appliedOn, setAppliedOn] = useState<string | null>(null);
-  const [undoAvailable, setUndoAvailable] = useState(false);
-
-  const [loading, setLoading] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [progressLabel, setProgressLabel] = useState("");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  // Le chat vecchie perdono la scansione (vive nel processo Rust): al primo
-  // messaggio la rifacciamo, cosi' la conversazione riprende da dove stava.
-  const needsRescan = useRef(false);
+  // L'ascoltatore degli eventi vive quanto la pagina: la chat corrente e i
+  // parametri del modello glieli passiamo per riferimento, non per closure.
+  const currentChat = useRef(chatId);
+  useEffect(() => {
+    currentChat.current = chatId;
+  }, [chatId]);
 
   const toast = useCallback((kind: Toast["kind"], text: string) => {
     setToasts((prev) => [...prev, { id: newId("t"), kind, message: text }]);
@@ -95,17 +103,15 @@ export default function ChatPage() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  const push = useCallback((msg: ChatMessage) => setMessages((prev) => [...prev, msg]), []);
-
   /* ------------------------------ avvio e stato ----------------------------- */
 
   useEffect(() => {
     void (async () => {
       try {
         const [prefs, cfg, list] = await Promise.all([
-          invoke<Preferences>("get_preferences"),
-          invoke<Config>("get_config"),
-          invoke<ChatMetadata[]>("list_chats"),
+          call<Preferences>("get_preferences"),
+          call<Config>("get_config"),
+          call<ChatMetadata[]>("list_chats"),
         ]);
         setPreferences(prefs);
         setConfig(cfg);
@@ -120,34 +126,37 @@ export default function ChatPage() {
     document.documentElement.dataset.theme = preferences.theme;
   }, [preferences.theme]);
 
-  // Stato dei motori AI: all'avvio e a ogni cambio di URL/modello.
+  // Stato dei motori: all'avvio e a ogni cambio di motore, indirizzo o modello.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const s = await invoke<AiStatus>("check_ai_status", { ollamaUrl: preferences.ollama_url });
+      const s = await call<AiStatus>("check_ai_status", { ollamaUrl: preferences.ollama_url });
       if (!cancelled) setStatus(s);
     })().catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [preferences.ollama_url, preferences.use_premium_ai]);
+  }, [preferences.ollama_url, preferences.use_premium_ai, preferences.ollama_model]);
 
-  // Progresso emesso dal backend durante scansione e spostamento.
+  // Effetto macchina da scrivere: ogni evento e' un pezzo di risposta.
   useEffect(() => {
-    const unlisteners = [
-      listen<ScanProgress>("scan-progress", (e) =>
-        setProgressLabel(`${e.payload.scanned.toLocaleString("it-IT")} file scansionati`),
-      ),
-      listen<ApplyProgress>("apply-progress", (e) =>
-        setProgressLabel(`sposto ${e.payload.done.toLocaleString("it-IT")} / ${e.payload.total.toLocaleString("it-IT")}`),
-      ),
-    ];
-    return () => {
-      unlisteners.forEach((u) => void u.then((f) => f()));
-    };
+    return subscribe<AssistantDelta>("assistant-delta", (delta) => {
+      if (delta.chat_id !== currentChat.current) return;
+      // Il primo pezzo di testo chiude la riga di stato: da qui in poi si legge.
+      setStatusText(null);
+      setStreamingText((prev) => (prev ?? "") + delta.text);
+    });
   }, []);
 
-  /* -------------------------------- persistenza ------------------------------- */
+  // Ricerche e pagine aperte, mentre lo schermo sarebbe fermo.
+  useEffect(() => {
+    return subscribe<AssistantStatus>("assistant-status", (status) => {
+      if (status.chat_id !== currentChat.current) return;
+      setStatusText(status.text);
+    });
+  }, []);
+
+  /* -------------------------------- persistenza ------------------------------ */
 
   const persist = useCallback(
     async (msgs: ChatMessage[], patch: Partial<StoredChat> = {}) => {
@@ -156,275 +165,196 @@ export default function ChatPage() {
         title,
         created,
         updated: new Date().toISOString(),
-        folders,
         message_count: msgs.length,
-        files_moved: filesMoved,
-        folders_created: foldersCreated,
-        applied_on: appliedOn,
         messages: msgs,
-        final_proposal: proposal ?? undefined,
         ...patch,
       };
       try {
-        await invoke("save_chat", { chat });
-        setChats(await invoke<ChatMetadata[]>("list_chats"));
+        await call("save_chat", { chat });
+        setChats(await call<ChatMetadata[]>("list_chats"));
       } catch (e) {
-        toast("error", `Chat non salvata: ${String(e)}`);
+        toast("error", `Conversazione non salvata: ${String(e)}`);
       }
     },
-    [chatId, title, created, folders, filesMoved, foldersCreated, appliedOn, proposal, toast],
+    [chatId, title, created, toast],
   );
 
-  /* --------------------------------- azioni --------------------------------- */
+  /* ------------------------------ conversazione ----------------------------- */
 
-  const applyReply = useCallback(
-    (reply: ChatReply) => {
-      const added: ChatMessage[] = [];
-      if (reply.response.trim()) added.push(message("ai", reply.response));
-      if (reply.proposal) {
-        const block = message("ai", "Schema proposto", "proposal_block", reply.proposal);
-        added.push(block);
-        setProposal(reply.proposal);
-        setActiveProposalId(block.id);
-        setPreview(reply.preview);
-      }
-
-      setFolders(reply.folders);
-      setFileCount(reply.file_count);
-
-      if (reply.intent === "applied" && reply.apply_result) {
-        setProposal(null);
-        setActiveProposalId(null);
-        setPreview(null);
-        setFilesMoved((n) => n + reply.apply_result!.files_moved);
-        setFoldersCreated((n) => n + reply.apply_result!.folders_created);
-        setAppliedOn(new Date().toISOString());
-        setUndoAvailable(true);
-        toast("success", `${reply.apply_result.files_moved} file organizzati.`);
-      }
-      if (reply.intent === "cancelled") {
-        setProposal(null);
-        setActiveProposalId(null);
-        setPreview(null);
-      }
-      if (reply.intent === "undone") {
-        setUndoAvailable(false);
-        toast("info", "Operazione annullata.");
-      }
-      if (reply.error) toast("error", reply.error);
-
-      setMessages((prev) => [...prev, ...added]);
-      return added;
-    },
-    [toast],
+  const aiConfig = useCallback(
+    () => ({
+      use_premium_ai: preferences.use_premium_ai,
+      ollama_url: preferences.ollama_url,
+      ollama_model: preferences.ollama_model,
+      user_preferences: config.user_preferences,
+      web_search: preferences.web_search,
+    }),
+    [preferences, config.user_preferences],
   );
 
-  const restoreScans = useCallback(async () => {
-    if (!needsRescan.current || folders.length === 0) return;
-    needsRescan.current = false;
-    setProgressLabel("riapro le cartelle della chat");
-    try {
-      const reply = await invoke<ChatReply>("scan_folders", { chatId, folders });
-      setFolders(reply.folders);
-      setFileCount(reply.file_count);
-    } catch (e) {
-      toast("error", `Non sono riuscita a rileggere le cartelle: ${String(e)}`);
-    } finally {
-      setProgressLabel("");
-    }
-  }, [chatId, folders, toast]);
+  /**
+   * Un turno completo: manda `text`, riceve la risposta in streaming e salva.
+   * `history` e' la conversazione *prima* di questo messaggio, cosi' la stessa
+   * funzione serve sia per un messaggio nuovo sia per "Rigenera".
+   */
+  const run = useCallback(
+    async (text: string, history: ChatMessage[], attachments: Attachment[] = []) => {
+      const turns: ChatTurn[] = history
+        .filter((m) => m.type === "text")
+        .map((m) => ({ role: m.role, content: promptContent(m) }));
 
-  const send = useCallback(
-    async (text: string) => {
       const userMessage = message("user", text);
-      const history: ChatTurn[] = messages
-        .filter((m) => m.type !== "proposal_block")
-        .map((m) => ({ role: m.role, content: m.content }));
-      setMessages((prev) => [...prev, userMessage]);
-      setLoading(true);
+      if (attachments.length > 0) userMessage.attachments = attachments;
+      const withUser = [...history, userMessage];
+      setMessages(withUser);
+      setStreamingText(null);
+      setStatusText(null);
+      setWaiting(true);
 
-      // La prima frase dell'utente da' il titolo alla conversazione.
-      const nextTitle = title === "Nuova chat" ? text.slice(0, 48) : title;
-      if (nextTitle !== title) setTitle(nextTitle);
+      const provisional =
+        title === UNTITLED ? titleFrom(text || attachments.map((a) => a.name).join(", ")) : title;
+      if (provisional !== title) setTitle(provisional);
+
+      // Se nel frattempo l'utente cambia conversazione, questa risposta non
+      // deve piu' finire a schermo: appartiene a un'altra chat.
+      const startedIn = chatId;
+      const stillHere = () => currentChat.current === startedIn;
 
       try {
-        await restoreScans();
-        const reply = await invoke<ChatReply>("chat_message", {
-          message: text,
+        const reply = await call<TalkReply>("talk", {
           chatId,
-          history,
-          config: {
-            use_premium_ai: preferences.use_premium_ai,
-            ollama_url: preferences.ollama_url,
-            ollama_model: preferences.ollama_model,
-            user_preferences: config.user_preferences,
-          },
-          proposal,
+          message: promptContent(userMessage),
+          history: turns,
+          config: aiConfig(),
         });
-        const added = applyReply(reply);
-        void persist([...messages, userMessage, ...added], { title: nextTitle });
+        if (!stillHere()) return;
+
+        const answer = reply.text.trim();
+        const aiMessage = message("ai", answer);
+        const sources: WebSource[] = reply.sources ?? [];
+        if (sources.length > 0) aiMessage.sources = sources;
+        const finalMessages = answer.length > 0 ? [...withUser, aiMessage] : withUser;
+        // Il testo in streaming sparisce nello stesso momento in cui compare il
+        // messaggio finito, altrimenti si vede due volte.
+        setStreamingText(null);
+        setStatusText(null);
+        setMessages(finalMessages);
+        if (reply.error) toast("error", reply.error);
+        if (answer.length === 0 && !reply.stopped) {
+          toast("error", "Il modello non ha risposto nulla. Riprova o cambia modello.");
+        }
+
+        void persist(finalMessages, { title: provisional });
+
+        // Il titolo vero arriva dopo il primo scambio, quando c'e' abbastanza
+        // contesto: se il modello non collabora resta quello provvisorio.
+        if (history.length === 0 && answer.length > 0) {
+          const suggested = await call<string | null>("suggest_title", {
+            question: text,
+            answer,
+            config: aiConfig(),
+          }).catch(() => null);
+          if (suggested && stillHere()) {
+            setTitle(suggested);
+            void persist(finalMessages, { title: suggested });
+          }
+        }
       } catch (e) {
-        push(message("ai", `Qualcosa e' andato storto: ${String(e)}`, "notification"));
-        toast("error", String(e));
+        if (!stillHere()) return;
+        const failed = [...withUser, message("ai", String(e), "notification")];
+        setStreamingText(null);
+        setMessages(failed);
+        void persist(failed, { title: provisional });
       } finally {
-        setLoading(false);
-        setProgressLabel("");
+        if (stillHere()) {
+          setWaiting(false);
+          setStreamingText(null);
+          setStatusText(null);
+        }
       }
     },
-    [messages, title, chatId, preferences, config, proposal, applyReply, persist, push, restoreScans, toast],
+    [chatId, title, aiConfig, persist, toast],
   );
 
-  const approve = useCallback(async () => {
-    if (!proposal) return;
-    setBusy(true);
-    try {
-      const result = await invoke<ApplyResult>("apply_proposal", { chatId, proposal });
-      const note = message(
-        "ai",
-        `✅ Fatto! ${result.files_moved} file spostati in ${result.folders_created} cartelle.` +
-          (result.errors.length > 0 ? `\nAlcuni problemi: ${result.errors.slice(0, 3).join("; ")}` : "") +
-          "\nSe non ti convince, scrivi “annulla” e rimetto tutto com'era.",
-        "notification",
-      );
-      setProposal(null);
-      setActiveProposalId(null);
-      setPreview(null);
-      setFilesMoved((n) => n + result.files_moved);
-      setFoldersCreated((n) => n + result.folders_created);
-      const now = new Date().toISOString();
-      setAppliedOn(now);
-      setUndoAvailable(true);
-      push(note);
-      toast("success", `${result.files_moved} file organizzati.`);
-      void persist([...messages, note], { files_moved: filesMoved + result.files_moved, applied_on: now });
-    } catch (e) {
-      push(message("ai", `Non ho potuto applicare lo schema: ${String(e)}`, "notification"));
-      toast("error", String(e));
-    } finally {
-      setBusy(false);
-      setProgressLabel("");
-    }
-  }, [proposal, chatId, messages, filesMoved, push, persist, toast]);
-
-  const undo = useCallback(async () => {
-    setBusy(true);
-    try {
-      const msg = await invoke<string>("undo_last_action", { chatId });
-      const note = message("ai", `↩ ${msg}`, "notification");
-      setUndoAvailable(false);
-      push(note);
-      toast("info", msg);
-      void persist([...messages, note]);
-    } catch (e) {
-      toast("error", String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [chatId, messages, push, persist, toast]);
-
-  // Ctrl+Z annulla l'ultima operazione, come in qualsiasi altra app.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.ctrlKey && e.key.toLowerCase() === "z" && undoAvailable && !busy) {
-        e.preventDefault();
-        void undo();
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [undoAvailable, busy, undo]);
-
-  /** Ricalcola l'anteprima quando l'utente modifica lo schema a mano. */
-  const changeProposal = useCallback(
-    async (updated: OrganizationProposal) => {
-      setProposal(updated);
-      setMessages((prev) =>
-        prev.map((m) => (m.id === activeProposalId ? { ...m, proposalData: updated } : m)),
-      );
-      try {
-        setPreview(await invoke<PlanPreview>("preview_proposal", { chatId, proposal: updated }));
-      } catch (e) {
-        toast("error", String(e));
-      }
+  /** Manda un messaggio: i file scelti col "+" vengono letti prima di partire. */
+  const send = useCallback(
+    (text: string, attachmentPaths: string[] = []) => {
+      void (async () => {
+        let attachments: Attachment[] = [];
+        if (attachmentPaths.length > 0) {
+          try {
+            attachments = await call<Attachment[]>("read_attachments", { paths: attachmentPaths });
+          } catch (e) {
+            toast("error", `Allegati non letti: ${String(e)}`);
+            return;
+          }
+          for (const failed of attachments.filter((a) => a.error !== null)) {
+            toast("error", `${failed.name}: ${failed.error}`);
+          }
+        }
+        await run(text, messages, attachments);
+      })();
     },
-    [activeProposalId, chatId, toast],
+    [run, messages, toast],
   );
 
-  const cancelProposal = useCallback(() => {
-    setProposal(null);
-    setActiveProposalId(null);
-    setPreview(null);
-    push(message("ai", "Ok, lascio perdere questo schema. Dimmi come preferisci procedere.", "notification"));
-  }, [push]);
+  const stop = useCallback(() => {
+    void call("stop_talk").catch(() => undefined);
+  }, []);
 
-  const addFolder = useCallback(async () => {
-    const picked = await open({ directory: true, multiple: true, title: "Cartelle da organizzare" });
-    if (!picked) return;
-    const list = Array.isArray(picked) ? picked : [picked];
-    setLoading(true);
-    try {
-      const reply = await invoke<ChatReply>("scan_folders", { chatId, folders: list });
-      applyReply(reply);
-    } catch (e) {
-      toast("error", String(e));
-    } finally {
-      setLoading(false);
-      setProgressLabel("");
-    }
-  }, [chatId, applyReply, toast]);
+  /** Rigenera: si toglie l'ultima risposta e si rimanda l'ultima domanda. */
+  const regenerate = useCallback(() => {
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUser) return;
+    const index = messages.indexOf(lastUser);
+    void run(lastUser.content, messages.slice(0, index), lastUser.attachments ?? []);
+  }, [messages, run]);
 
   /* ------------------------------ gestione chat ----------------------------- */
 
-  function resetTo(id: string) {
-    setChatId(id);
-    setProposal(null);
-    setActiveProposalId(null);
-    setPreview(null);
-    setFolders([]);
-    setFileCount(0);
-    setFilesMoved(0);
-    setFoldersCreated(0);
-    setAppliedOn(null);
-    setUndoAvailable(false);
-    setProgressLabel("");
-  }
+  const newChat = useCallback(() => {
+    stop();
+    setChatId(newChatId());
+    setCreated(new Date().toISOString());
+    setTitle(UNTITLED);
+    setMessages([]);
+    setStreamingText(null);
+    setStatusText(null);
+    setWaiting(false);
+  }, [stop]);
 
-  function newChat() {
-    resetTo(newChatId());
-    setTitle("Nuova chat");
-    setMessages([message("ai", GREETING)]);
-    needsRescan.current = false;
-  }
+  const selectChat = useCallback(
+    async (id: string) => {
+      if (id === chatId) return;
+      stop();
+      try {
+        const chat = await call<StoredChat>("load_chat", { chatId: id });
+        setChatId(id);
+        setCreated(chat.created);
+        setTitle(chat.title);
+        setMessages(chat.messages);
+        setStreamingText(null);
+        setStatusText(null);
+        setWaiting(false);
+      } catch (e) {
+        toast("error", `Conversazione non caricata: ${String(e)}`);
+      }
+    },
+    [chatId, stop, toast],
+  );
 
-  async function selectChat(id: string) {
-    if (id === chatId) return;
-    try {
-      const chat = await invoke<StoredChat>("load_chat", { chatId: id });
-      resetTo(id);
-      setTitle(chat.title);
-      setMessages(chat.messages);
-      setFolders(chat.folders);
-      setFilesMoved(chat.files_moved);
-      setFoldersCreated(chat.folders_created);
-      setAppliedOn(chat.applied_on);
-      setUndoAvailable(await invoke<boolean>("has_undo", { chatId: id }));
-      // La scansione non e' salvata su disco: si rifa' al primo messaggio.
-      needsRescan.current = chat.folders.length > 0;
-    } catch (e) {
-      toast("error", `Chat non caricata: ${String(e)}`);
-    }
-  }
-
-  async function removeChat(id: string) {
-    try {
-      await invoke("delete_chat", { chatId: id });
-      setChats(await invoke<ChatMetadata[]>("list_chats"));
-      if (id === chatId) newChat();
-      toast("info", "Chat eliminata.");
-    } catch (e) {
-      toast("error", String(e));
-    }
-  }
+  const removeChat = useCallback(
+    async (id: string) => {
+      try {
+        await call("delete_chat", { chatId: id });
+        setChats(await call<ChatMetadata[]>("list_chats"));
+        if (id === chatId) newChat();
+      } catch (e) {
+        toast("error", String(e));
+      }
+    },
+    [chatId, newChat, toast],
+  );
 
   async function saveSettings(prefs: Preferences, cfg: Config) {
     setPreferences(prefs);
@@ -432,50 +362,55 @@ export default function ChatPage() {
     setSettingsOpen(false);
     try {
       await Promise.all([
-        invoke("set_preferences", { preferences: prefs }),
-        invoke("set_config", { config: cfg }),
+        call("set_preferences", { preferences: prefs }),
+        call("set_config", { config: cfg }),
       ]);
-      toast("success", "Impostazioni salvate.");
     } catch (e) {
       toast("error", String(e));
     }
   }
 
+  // Ctrl+N apre una conversazione nuova, come nel resto del sistema.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.ctrlKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        newChat();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [newChat]);
+
   const online = preferences.use_premium_ai ? (status?.claude ?? false) : (status?.ollama ?? false);
-  const engineLabel = preferences.use_premium_ai ? "Claude" : `Ollama · ${preferences.ollama_model}`;
+  // Etichetta corta per il riquadro del composer: solo il nome del modello.
+  const engineLabel = preferences.use_premium_ai ? "claude-api" : preferences.ollama_model;
 
   return (
-    <div className="layout">
-      <ChatInterface
-        messages={messages}
-        activeProposalId={activeProposalId}
-        preview={preview}
-        isLoading={loading}
-        busy={busy}
-        progressLabel={progressLabel}
-        online={online}
-        engineLabel={engineLabel}
-        undoAvailable={undoAvailable}
-        folders={folders}
-        fileCount={fileCount}
-        suggestions={config.monitored_folders}
-        onSendMessage={(text) => void send(text)}
-        onProposalChange={(p) => void changeProposal(p)}
-        onApprove={() => void approve()}
-        onCancelProposal={cancelProposal}
-        onUndo={() => void undo()}
-        onCancelApply={() => void invoke("cancel_apply").catch(() => undefined)}
-        onAddFolder={() => void addFolder()}
-        onOpenSettings={() => setSettingsOpen(true)}
-      />
-
+    <div className={`layout ${sidebarOpen ? "" : "no-sidebar"}`}>
       <Sidebar
         chats={chats}
         currentChatId={chatId}
+        open={sidebarOpen}
         onNewChat={newChat}
         onSelectChat={(id) => void selectChat(id)}
         onDeleteChat={(id) => void removeChat(id)}
         onOpenSettings={() => setSettingsOpen(true)}
+      />
+
+      <ChatView
+        messages={messages}
+        streamingText={streamingText}
+        waiting={waiting}
+        statusText={statusText}
+        online={online}
+        engineLabel={engineLabel}
+        sidebarOpen={sidebarOpen}
+        onToggleSidebar={() => setSidebarOpen((v) => !v)}
+        onSend={send}
+        onStop={stop}
+        onRegenerate={regenerate}
+        onError={(text) => toast("error", text)}
       />
 
       {settingsOpen && (
@@ -485,6 +420,7 @@ export default function ChatPage() {
           status={status}
           onSave={(p, c) => void saveSettings(p, c)}
           onClose={() => setSettingsOpen(false)}
+          onNotice={toast}
         />
       )}
 

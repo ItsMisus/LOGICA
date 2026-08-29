@@ -1,26 +1,29 @@
-# LOGICA — organizza i file chiacchierando
+# Logica — assistente di conversazione desktop
 
-App desktop (Tauri 2 + React + Rust) con un assistente conversazionale, **Logica**, che capisce a
-parole quali cartelle sistemare, propone uno schema, lo applica e sa tornare indietro.
+App desktop (Tauri 2 + React + Rust) con un assistente con cui parlare: domande, ragionamenti,
+codice, testi. La risposta arriva **in streaming**, token per token, e le conversazioni restano
+sul disco in `~/.logica/`.
 
-Il motore AI è **Ollama in locale** (default, offline e gratis) oppure la **Claude API**
-(opzionale). Niente viene spostato senza anteprima e approvazione; ogni applicazione è annullabile.
+Il motore è **Ollama in locale** (default, offline e gratis) oppure la **Claude API** (opzionale).
+Quando una domanda ha bisogno di dati aggiornati, Logica **cerca su internet** da sola e risponde
+citando le pagine che ha letto.
 
 ```
-┌────────────────────────────────────┬──────────────────┐
-│ Logica (online · Ollama · mistral) │ [+ Nuova chat]   │
-├────────────────────────────────────┼──────────────────┤
-│ AI: Dimmi quale cartella sistemare │ Chat recenti:    │
-│ User: organizza Downloads          │ • Organizza Do…  │
-│ AI: 234 file. Per tipo, data o…?   │ • Desktop        │
-│ User: per tipo                     │                  │
-│ AI: [SCHEMA PROPOSTO + tabella]    │ 1.234 file       │
-│     [Approva] [Modifica] [Annulla] │ questo mese      │
-│ AI: ✅ 234 file spostati            │                  │
-├────────────────────────────────────┼──────────────────┤
-│ [📁] [messaggio…] [Invia] [↩ Undo] │ ⚙️ Impostazioni  │
-└────────────────────────────────────┴──────────────────┘
+┌──────────────────┬─────────────────────────────────────────┐
+│ [+ Nuova chat]   │  ☰  Logica                              │
+│ [cerca…]         │                                         │
+│                  │              ✳ Buonasera                │
+│ OGGI             │      ┌───────────────────────────────┐  │
+│ • Regex in Rust  │      │ Scrivi a Logica…         [↑]  │  │
+│ • Lettera al…    │      └───────────────────────────────┘  │
+│                  │   [Spiegami una cosa] [Rivedi codice]   │
+│ Impostazioni     │                                         │
+└──────────────────┴─────────────────────────────────────────┘
 ```
+
+Impianto grafico ispirato alle interfacce di Anthropic: fondo avorio, colonna di lettura stretta e
+centrata, bolla solo per i messaggi dell'utente, arancione *book cloth* come unico accento, titoli
+in serif. Tema chiaro di default, scuro nelle impostazioni.
 
 ---
 
@@ -30,7 +33,7 @@ Il motore AI è **Ollama in locale** (default, offline e gratis) oppure la **Cla
 |---|---|---|
 | Node.js | ≥ 18 | |
 | Rust | stable (rustup) | **necessario per compilare il backend** |
-| Ollama | qualsiasi | opzionale: senza, restano i criteri deterministici |
+| Ollama | qualsiasi | serve per rispondere in locale |
 | Build tools Windows | MSVC + WebView2 | Visual Studio Build Tools, workload C++ |
 
 ```powershell
@@ -38,11 +41,12 @@ winget install --id Rustlang.Rustup -e
 rustup default stable
 
 winget install --id Ollama.Ollama -e
-ollama pull mistral        # modello di default
+ollama pull llama3.1:8b    # modello di default
 ```
 
-Verifica Ollama: `curl http://localhost:11434/api/tags` deve rispondere JSON. Con una RTX 4070
-Super vanno bene anche `llama3.1:8b` o `qwen2.5:7b`; il modello si cambia da **Impostazioni**.
+Verifica Ollama: `curl http://localhost:11434/api/tags` deve rispondere JSON. Il modello si cambia
+da **Impostazioni**, che elenca quelli installati. `llama3.1:8b` è il default; `mistral` (7B) è il
+minimo sindacale, `qwen2.5:14b` ragiona meglio se la GPU regge.
 
 ## Avvio
 
@@ -52,7 +56,7 @@ npm run tauri dev     # dev server + finestra desktop
 npm run tauri build   # eseguibile + installer in src-tauri/target/release
 ```
 
-Claude API (opzionale): imposta la chiave **prima** di avviare, poi attiva "Usa Claude API" nelle
+Claude API (opzionale): imposta la chiave **prima** di avviare, poi scegli "Claude API" nelle
 impostazioni.
 
 ```powershell
@@ -64,47 +68,50 @@ Il modello usato è `claude-opus-5`. Senza chiave l'app resta su Ollama.
 
 ---
 
-## Come ragiona Logica
+## Com'è fatta la conversazione
 
-Il flusso **non** è affidato tutto al modello: le decisioni che toccano il disco sono riconosciute
-da regole deterministiche in Rust (`ai_conversationalist::classify`), al modello resta il
-linguaggio. Così l'app funziona anche con un 7B che sbaglia il JSON, e continua a rispondere pure
-senza AI.
+- **Streaming**: il backend legge la risposta riga per riga (NDJSON per Ollama, SSE per Claude) e
+  la rilancia al frontend come eventi `assistant-delta`; il testo compare mentre viene generato.
+- **Interrompi**: il pulsante quadrato ferma la generazione e **tiene** il testo già arrivato.
+- **Rigenera**: rimanda l'ultima domanda senza l'ultima risposta.
+- **Storico**: al modello vanno gli ultimi 30 turni della chat corrente, più le istruzioni
+  personalizzate scritte nelle impostazioni e la data di oggi.
+- **Titolo**: dopo il primo scambio è il modello stesso a proporlo; se non ne esce niente di
+  sensato resta la prima frase dell'utente.
+- **Markdown**: titoli, elenchi, citazioni, tabelle, codice con pulsante *Copia*. Il parser è in
+  `src/components/Markdown.tsx`, senza librerie e senza `dangerouslySetInnerHTML`: il testo del
+  modello non può iniettare HTML.
 
-| Cosa scrivi | Intento | Cosa succede |
-|---|---|---|
-| "organizza Downloads", "sistema il Desktop", `"D:\foto"` | `Scan` | scansione + riepilogo e domanda sul criterio |
-| "per tipo" / "per data" / "per progetto" / "1" "2" "3" | `Propose` | schema + anteprima nel blocco proposta |
-| "applica", "vai", "perfetto" (frase corta) | `Apply` | sposta i file, registra l'undo |
-| "annulla", "torna indietro", "rollback" | `Undo` | rimette tutto dov'era |
-| tutto il resto | `Chat` | risposta del modello, con lo stato reale iniettato nel prompt |
+Il carattere dell'assistente sta tutto in `SYSTEM_PROMPT` (`src-tauri/src/assistant.rs`): risposta
+prima delle premesse, niente adulazione, una domanda sola quando la richiesta è ambigua, e il
+divieto di fingere accessi che non ha (file, rete, altri programmi).
 
-In chat: **📁** aggiunge cartelle col selettore di sistema, **Ctrl+Z** annulla l'ultima
-operazione, **Interrompi** ferma uno spostamento in corso (i file già mossi tornano indietro).
-Le cartelle monitorate impostate nelle preferenze compaiono come scorciatoie in ogni chat nuova.
+Scorciatoie: **Invio** manda, **Shift+Invio** va a capo, **Ctrl+N** apre una conversazione nuova.
 
-Criteri di organizzazione:
+### Ricerca su internet
 
-- **per tipo** — lo schema lo propone l'AI (con fallback deterministico per estensione se la
-  risposta non è valida); le regole sono pattern sul nome (`*.pdf`, `img_*`, `*fattura*`).
-- **per data** — `2024/03 - Marzo` calcolato dalla data di modifica.
-- **per anno** — `2024`.
-- **per progetto** — primo livello del percorso di provenienza.
+Prima di rispondere, l'app fa un giro in più (`src-tauri/src/web.rs`):
 
-I criteri sui metadati non passano dalle regole sul nome: la destinazione si ricava dal file, cosa
-che un pattern non può esprimere.
+1. **Link scritti dall'utente**: se nel messaggio c'è un indirizzo `http(s)://`, l'app apre fino a
+   due pagine e ne passa il testo al modello. Succede anche a ricerca spenta: l'ha chiesto l'utente.
+2. **Serve cercare?** Se non ci sono link, il modello riceve una domanda di servizio separata
+   («questa richiesta ha bisogno di internet? se sì, scrivi la query») e risponde con una riga o
+   con `NO`. Decidere e rispondere in un colpo solo è il tipo di doppio compito su cui un 7B
+   sbaglia; separarli costa una chiamata corta e funziona anche in locale.
+3. **Ricerca**: la query va a **DuckDuckGo** (endpoint HTML, nessuna chiave API) e, se DuckDuckGo
+   blocca l'indirizzo perché ha ricevuto troppe richieste, a **Bing**. Delle prime pagine si legge
+   il testo — via tag, script e CSS — tagliato a 6.000 caratteri l'una.
+4. **Risposta**: i risultati entrano nel prompt di sistema di quel solo turno, con l'ordine di
+   fidarsi di quei dati e citare le fonti come link. Le pagine consultate compaiono come chip
+   sotto la risposta e restano nella chat salvata.
 
-## Sicurezza
+Mentre cerca, la chat mostra cosa sta facendo (evento `assistant-status`): *Cerco su internet: …*,
+*Leggo …*. Se la ricerca non trova niente o la rete è giù, il modello lo dice invece di inventare.
 
-- **Nessun file viene mai cancellato**: solo `rename` (o copia + rimozione dell'originale tra
-  volumi diversi). `remove_dir` tocca solo cartelle vuote create dall'app.
-- Destinazioni sanificate: niente `..`, niente percorsi assoluti, niente caratteri illegali su
-  Windows, massimo 4 livelli.
-- Pre-flight: ogni destinazione deve restare dentro la cartella scelta, ogni sorgente deve esistere.
-- Conflitti di nome risolti con suffisso `_1`, `_2`, … **prima** di toccare il disco.
-- Applicazione su più cartelle = operazione unica: se una fallisce si annullano anche le altre.
-- "tutto il PC" resta limitato a Download, Desktop e Documenti.
-- Gli id delle chat accettano solo `[A-Za-z0-9_-]`: nessuna scrittura fuori da `~/.logica/chats/`.
+L'interruttore sta in **Impostazioni → Internet** ed è acceso di default; da browser non si cambia,
+come il resto della configurazione del motore. Fuori esce **la query**, non i tuoi file. Gli
+indirizzi locali e di rete interna (`localhost`, `192.168.*`, `*.local`, `169.254.169.254`) sono
+rifiutati, anche dopo un redirect: il modello non può usare l'app per bussare ai servizi di casa.
 
 ---
 
@@ -112,37 +119,68 @@ che un pattern non può esprimere.
 
 ```
 ~/.logica/
-├── config.json              cartelle monitorate, profilo, preferenze testuali
-├── preferences.json         tema, motore AI, URL e modello Ollama
-├── operations_log.json      ultime 50 operazioni, con i log per l'undo
+├── config.json              istruzioni personalizzate, cartelle raggiungibili dal browser
+├── preferences.json         tema, motore AI, URL e modello Ollama, ricerca su internet
 └── chats/
     └── chat_20260829_142530_a1b2.json
 ```
 
-Una chat salvata contiene metadati, messaggi e ultima proposta:
+Una chat salvata:
 
 ```json
 {
   "id": "20260829_142530_a1b2",
-  "title": "organizza Downloads",
+  "title": "Regex in Rust",
   "created": "2026-08-29T14:25:30Z",
   "updated": "2026-08-29T14:31:02Z",
-  "folders": ["C:\\Users\\me\\Downloads"],
-  "files_moved": 234,
-  "folders_created": 9,
-  "applied_on": "2026-08-29T14:31:02Z",
   "messages": [
-    { "id": "m1", "role": "ai", "content": "Ciao, sono Logica…", "timestamp": "…", "type": "text" }
-  ],
-  "final_proposal": { "schema": {}, "rules": [], "rationale": "…", "source": "ollama", "grouping": "extension" }
+    { "id": "m1", "role": "user", "content": "come si scrive…", "timestamp": "…", "type": "text" },
+    { "id": "m2", "role": "ai", "content": "…", "timestamp": "…", "type": "text",
+      "sources": [{ "title": "…", "url": "https://…", "snippet": "…" }] }
+  ]
 }
 ```
 
-La scansione **non** viene salvata (può essere di 100k file): riaprendo una chat vecchia le
-cartelle vengono riesaminate al primo messaggio.
+Gli id delle chat accettano solo `[A-Za-z0-9_-]`: nessuna scrittura fuori da `~/.logica/chats/`.
 
-L'undo sopravvive al riavvio dell'app perché i log stanno in `operations_log.json`; in più ogni
-cartella organizzata conserva `.file-organizer-undo.json` come traccia.
+---
+
+## Accesso da browser
+
+Logica può rispondere anche a un browser su un altro dispositivo della rete locale. Il server vive
+dentro il processo dell'app: un solo proprietario di `~/.logica`, nessuna scrittura concorrente
+sulle chat. Si accende da Impostazioni → *Accesso da browser*; da spento non apre nessuna porta.
+
+Prima di poterlo accendere serve una password (minimo 12 caratteri), salvata solo come hash
+Argon2id in `~/.logica/server.json`.
+
+### Cosa protegge cosa
+
+| Strato | File | Cosa garantisce |
+|---|---|---|
+| TLS | `server/tls.rs` | Certificato auto-firmato: password e cookie non viaggiano in chiaro |
+| Sessione | `server/auth.rs` | Password Argon2id, cookie `HttpOnly`/`Secure`/`SameSite=Strict`, scadenza per inattività (30 min) e assoluta (12 h), sessione legata all'indirizzo IP, blocco di 15 minuti dopo 5 tentativi falliti |
+| CSRF | `server/api.rs` | Token per sessione nell'header `X-Logica-Csrf`, più confronto fra `Origin` e `Host` su ogni scrittura |
+| Recinto | `server/guard.rs` | Ogni percorso deve stare sotto `monitored_folders`: rifiuta `..`, gli stream alternativi NTFS (`file:stream`), i nomi di dispositivo (`NUL`, `COM1`) e i link che escono |
+| Intestazioni | `server/api.rs` | CSP senza sorgenti esterne, `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, corpo limitato a 8 MB |
+
+### Cosa il browser non può fare, nemmeno autenticato
+
+- **Allargare il recinto**: `set_config` rifiuta ogni modifica a `monitored_folders`.
+- **Spostare il motore AI**: `set_preferences` rifiuta ogni modifica a `ollama_url`, e `ollama_url`
+  nel corpo delle richieste viene comunque ignorato a favore di quello salvato sul PC. Senza questo,
+  una sessione valida basterebbe a far spedire altrove conversazioni e nomi dei file.
+- **Allegare file**: gli allegati si leggono per percorso dal dialogo di sistema, che nel browser
+  non esiste; il pulsante non compare.
+
+### Prima connessione
+
+Il browser avvisa che il certificato non è verificato: è atteso, se lo firma Logica stessa. Prima
+di accettare, confronta l'impronta SHA-256 mostrata dal browser con quella scritta nel pannello
+delle impostazioni. Se non coincidono, non stai parlando con il tuo PC.
+
+> Non aprire questa porta sul router. Non c'è nessuna protezione pensata per internet: per usarlo
+> fuori casa serve una VPN (Tailscale o simili).
 
 ---
 
@@ -152,110 +190,61 @@ cartella organizzata conserva `.file-organizer-undo.json` come traccia.
 file-organizer-ai/
 ├── src/
 │   ├── components/
-│   │   ├── ChatInterface.tsx              header, messaggi, typing, composer, undo
-│   │   ├── OrganizationProposalBlock.tsx  albero + tabella + statistiche + azioni
-│   │   ├── Sidebar.tsx                    chat, statistiche, impostazioni
-│   │   ├── SettingsModal.tsx              cartelle, profilo, motore AI, tema
-│   │   └── NotificationToast.tsx          toast
-│   ├── pages/ChatPage.tsx                 stato della conversazione, invoke, persistenza
-│   ├── types.ts                           interfacce condivise col backend
-│   ├── App.tsx / main.tsx / App.css       shell e tema (scuro + chiaro)
+│   │   ├── ChatView.tsx           header, thread, schermata iniziale, composer
+│   │   ├── Message.tsx            bolla utente / risposta + azioni (copia, rigenera)
+│   │   ├── Markdown.tsx           markdown minimo, senza dipendenze
+│   │   ├── Composer.tsx           campo che cresce, invio/interrompi
+│   │   ├── Sidebar.tsx            conversazioni per data, ricerca, impostazioni
+│   │   ├── SettingsModal.tsx      motore AI, modello, internet, istruzioni, tema
+│   │   └── NotificationToast.tsx  toast
+│   │   ├── LoginScreen.tsx        accesso da browser (invisibile sul desktop)
+│   │   └── RemoteAccessPanel.tsx  password, porta, impronta, cartelle raggiungibili
+│   ├── pages/ChatPage.tsx         stato della chat, streaming, persistenza
+│   ├── api.ts                     un solo modo di chiamare: IPC Tauri o HTTPS
+│   ├── types.ts                   interfacce condivise col backend
+│   └── App.tsx / main.tsx / App.css
 └── src-tauri/src/
     ├── main.rs                  setup Tauri, stato in memoria, comandi
-    ├── ai_conversationalist.rs  intenti, prompt di Logica, chiamate chat, testi
-    ├── ai_analyzer.rs           prompt schema, Ollama/Claude, validazione, fallback
-    ├── scanner.rs               scansione file system
-    ├── file_mapper.rs           regole/criteri → piano + conflitti + anteprima
-    ├── file_operations.rs       mkdir/move/rollback/undo, piani multipli
-    └── storage.rs               ~/.logica: chat, preferenze, log operazioni
+    ├── server/
+    │   ├── mod.rs               accensione, spegnimento, stato del server
+    │   ├── api.rs               rotte, sessione, CSRF, intestazioni
+    │   ├── auth.rs              password Argon2id, sessioni, blocco tentativi
+    │   ├── guard.rs             recinto dei percorsi
+    │   └── tls.rs               certificato auto-firmato e impronta
+    ├── assistant.rs             prompt, streaming Ollama/Claude, ricerca web, titolo
+    ├── web.rs                   ricerca (DuckDuckGo, Bing), pagine, HTML → testo
+    ├── attachments.rs           lettura dei file allegati a un messaggio
+    ├── ai.rs                    configurazione del motore AI e stato della connessione
+    └── storage.rs               ~/.logica: chat, preferenze, configurazione
 ```
 
-### Comandi Tauri
+### Comandi Tauri usati dalla chat
 
 | Comando | Argomenti (JS) | Ritorna |
 |---|---|---|
-| `chat_message` | `message`, `chatId`, `history`, `config`, `proposal` | `ChatReply` |
-| `scan_folders` | `chatId`, `folders` | `ChatReply` |
-| `preview_proposal` | `chatId`, `proposal` | `PlanPreview` |
-| `apply_proposal` | `chatId`, `proposal` | `ApplyResult` |
-| `undo_last_action` | `chatId` | `string` |
-| `has_undo` | `chatId` | `boolean` |
-| `cancel_apply` | — | — |
+| `talk` | `chatId`, `message`, `history`, `config` | `{ text, stopped, error, sources }` |
+| `stop_talk` | — | — |
+| `suggest_title` | `question`, `answer`, `config` | `string \| null` |
+| `read_attachments` | `paths` | `Attachment[]` |
 | `save_chat` / `load_chat` / `list_chats` / `delete_chat` | `chat` / `chatId` | `—` / `StoredChat` / `ChatMetadata[]` / `—` |
 | `get_preferences` / `set_preferences` | — / `preferences` | `Preferences` / `—` |
 | `get_config` / `set_config` | — / `config` | `Config` / `—` |
 | `check_ai_status` | `ollamaUrl` | `{ ollama, claude, models }` |
-| `open_folder_in_explorer` | `path` | — |
 
-Eventi: `scan-progress` (`{scanned, current}`), `apply-progress` (`{done, total, current}`).
+Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta, e
+`assistant-status` (`{ chat_id, text }`), cosa sta facendo l'app prima di scrivere.
 
----
-
-## Esempi di conversazione
-
-**Semplice**
-
-```
-User:   organizza Downloads
-Logica: Ho scansionato Downloads: 234 file trovati per 12.480 MB.
-        Tipi più frequenti: .pdf (45), .mp4 (78), .jpg (33), .zip (12), .docx (9).
-        Come preferisci organizzarli?
-        1) Per tipo  2) Per data  3) Per progetto
-User:   per tipo
-Logica: Ecco lo schema per tipo di file (schema suggerito dal modello locale)…
-        [SCHEMA PROPOSTO: albero + tabella + 234 file / 9 cartelle / 3 conflitti]
-User:   applica
-Logica: ✅ Fatto! Ho spostato 234 file in 9 cartelle.
-        Se non ti convince, scrivi "annulla" e rimetto tutto com'era.
-```
-
-**Più cartelle e ripensamento**
-
-```
-User:   sistema Downloads e Desktop
-Logica: Ho scansionato Downloads, Desktop: 512 file trovati per 30.112 MB…
-User:   per data
-Logica: Ecco lo schema per anno e mese. Riguarda 512 file…
-        [SCHEMA PROPOSTO: 2025/11 - Novembre, 2026/01 - Gennaio, …]
-User:   vai
-Logica: ✅ Fatto! Ho spostato 512 file in 14 cartelle.
-User:   annulla
-Logica: Fatto: ho rimesso 512 file dove stavano prima.
-```
-
-Le due cartelle sono trattate come un'unica operazione: l'undo le riporta indietro insieme.
-
----
-
-## Troubleshooting
-
-**"offline · nessun modello AI"** — Ollama non risponde su `localhost:11434`. Avvia `ollama serve`
-e controlla `ollama list`. L'app resta usabile: i criteri per data/progetto sono deterministici e
-"per tipo" ha lo schema di riserva per estensione.
-
-**La proposta arriva sempre dal "fallback"** — il modello non restituisce JSON valido. Prova
-`ollama pull llama3.1:8b` e cambialo nelle impostazioni; la console dev stampa il motivo
-(`[ai_analyzer] fallback attivato: …`).
-
-**Logica non capisce la cartella** — usa il pulsante 📁 accanto al messaggio, oppure scrivi il
-percorso tra virgolette: `organizza "D:\Archivio 2024"`.
-
-**Scansione lentissima** — hai puntato a una cartella enorme. Le cartelle di sistema,
-`node_modules`, `.git` e simili sono comunque saltate.
-
-**"Percorso lungo N caratteri"** — la destinazione supera i 260 caratteri di Windows: rinomina
-qualche cartella con "Modifica" nel blocco proposta.
-
-**`cargo` non trovato / errore `link.exe`** — manca Rust o il workload C++ dei Build Tools.
-
----
-
-## Sviluppo
+## Test
 
 ```bash
-cd src-tauri && cargo test        # 26 test: intenti, schema, date, storage, ciclo completo, multi-cartella
-cargo test -- --ignored           # 2 test live contro Ollama: turno di chat + proposta vera
-                                  # (richiedono `ollama serve` e il modello scaricato;
-                                  #  FOAI_TEST_MODEL cambia il modello usato)
-npm run build                     # typecheck TypeScript + bundle Vite
+cd src-tauri
+cargo test                                   # 49 test offline
+cargo test -- --ignored live_ollama_stream   # streaming vero contro Ollama
+cargo test -- --ignored live_search          # ricerca vera (DuckDuckGo/Bing)
+cargo test -- --ignored live_research        # ricerca + lettura delle pagine
+cargo test -- --ignored live_web_flow        # giro completo: decide, cerca, risponde
 ```
+
+I test live con Ollama richiedono `ollama serve` e il modello scaricato; `FOAI_TEST_MODEL` cambia
+il modello usato dai test. Quelli di ricerca richiedono internet: `live_search` fallisce se
+entrambi i motori rispondono con una pagina di blocco, e in quel caso il parsing va riguardato.
