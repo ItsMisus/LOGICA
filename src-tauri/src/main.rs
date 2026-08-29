@@ -6,6 +6,9 @@ mod file_mapper;
 mod file_operations;
 mod scanner;
 
+#[cfg(test)]
+mod e2e;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
