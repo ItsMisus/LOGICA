@@ -524,9 +524,12 @@ Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta
 npm run check                                # tipi + 25 test del frontend
 
 cd src-tauri
-cargo test                                   # 97 test offline
+cargo test                                   # 130 test offline
 cargo test -- --ignored live_ollama_stream   # streaming vero contro Ollama
 cargo test -- --ignored live_file_tools      # il modello cerca, apre e legge un file vero
+cargo test -- --ignored live_documents       # trova un documento per significato, non per parole
+cargo test -- --ignored live_memory          # impara quello che dura, scarta quello che scade
+cargo test -- --ignored live_summary         # riassume tenendo i dati concreti
 cargo test -- --ignored live_search          # ricerca vera (DuckDuckGo/Bing)
 cargo test -- --ignored live_research        # ricerca + lettura delle pagine
 cargo test -- --ignored live_web_flow        # giro completo: decide, cerca, risponde
@@ -542,6 +545,64 @@ a mano ed è il pezzo con più probabilità di rompersi in silenzio, e le funzio
 su Node: aggiungere jsdom costerebbe una dipendenza e qualche secondo a ogni esecuzione senza
 provare niente di più. Il test che conta di più è quello che verifica che il modello **non** possa
 iniettare HTML: se un giorno qualcuno introduce `dangerouslySetInnerHTML` per comodità, cade lì.
+
+
+## La misura su cento richieste
+
+I test live provano una funzione alla volta con un esempio scelto da chi ha scritto la funzione, che
+è il modo più comodo per farsi ingannare: l'esempio che viene in mente è quello che già funziona.
+`src-tauri/src/eval/` esegue invece cento richieste divise per quello che mettono alla prova — venti
+di chat normale, quindici di memoria, quindici sui documenti, quindici sugli strumenti dei file,
+dieci di ricerca web, dieci con allegati, dieci sull'uso degli strumenti in catena, cinque ambigue —
+e per ognuna misura nove cose: risposta corretta, strumento corretto, numero di chiamate, recupero
+corretto, lingua, risposte inventate, tempo, fallimenti, e le stesse cose su un secondo modello.
+
+```bash
+cargo test -- --ignored eval_run --nocapture
+FOAI_EVAL_MODELS=qwen3:30b-a3b,llama3.1:8b cargo test -- --ignored eval_run --nocapture
+FOAI_EVAL_CATEGORIES=documenti,file cargo test -- --ignored eval_run --nocapture
+FOAI_EVAL_FRESH=1 cargo test -- --ignored eval_run --nocapture   # ricomincia da zero
+```
+
+Le richieste girano su un corpus di dieci documenti scritti nel codice — fattura, contratto
+d'affitto, manutenzione caldaia, verbale, prenotazione, ricetta, tagliando, garanzia, analisi, note
+di progetto — riscritto da zero a ogni esecuzione. Non sono documenti veri per tre motivi: una
+misura dev'essere ripetibile, i file di chi usa il programma non vanno in un test, e soprattutto per
+misurare le risposte inventate bisogna sapere **cosa non c'è**, e lo si sa solo se il corpus l'hai
+scritto tu.
+
+Due scelte contano più del resto. I dati da trovare sono codici e importi che non si possono
+indovinare (`FD9812-004473`, `1.240,00`): un modello che li scrive li ha letti davvero, mentre una
+domanda dalla risposta prevedibile non distinguerebbe «ha guardato» da «ha detto qualcosa di
+sensato». E molti casi chiedono qualcosa che non c'è — il colore delle finestre in un preventivo che
+non lo dice, un file che non esiste, un file fuori dalle cartelle autorizzate — dove la risposta
+giusta è ammettere di non saperlo. Vale anche per la memoria, dove sei scambi su quindici non devono
+lasciare niente. Senza questi casi la misura premierebbe il modello che risponde sempre.
+
+Il recupero si misura chiamando la ricerca nei documenti direttamente, non deducendolo dalla
+risposta: così un file pescato bene con una risposta scritta male resta distinguibile dal caso
+opposto, e si sa quale dei due sistemare. Gli interruttori si accendono per categoria e non tutti
+insieme: nei casi sui documenti gli strumenti sui file restano spenti, altrimenti una risposta
+giusta non direbbe da dove è arrivata.
+
+Il giudizio è fatto di confronti fra stringhe, quindi **sottostima**: una risposta giusta scritta in
+un modo non previsto viene contata sbagliata. È un compromesso voluto — un giudice costruito con un
+altro modello sarebbe più indulgente ma sbaglierebbe in modo invisibile invece che elencato — e il
+rapporto stampa ogni caso caduto con la risposta intera, così si vede se è caduto il modello o il
+criterio. Sulle risposte inventate vale il contrario: si scoprono solo quelle previste caso per
+caso, e una bugia a cui non si era pensato passa liscia.
+
+Ogni esito finisce su disco appena arriva e un'esecuzione interrotta riprende da dove era rimasta.
+Non è prudenza teorica: il primo giro intero è stato fermato a 37 richieste su 100 e non ha lasciato
+niente, perché il rapporto si scriveva solo alla fine. Il giornale è un file a righe JSON — una riga
+in fondo o c'è o non c'è, mentre un file unico riscritto a ogni aggiunta si romperebbe proprio
+nell'istante per cui il giornale esiste.
+
+Il modulo sta dietro `#[cfg(test)]` e non finisce nell'eseguibile installato. Ventisei test
+controllano l'apparato di misura stesso — che il dataset abbia la forma dichiarata, che nessun caso
+sia impossibile da far fallire, che le percentuali non viaggino mai senza il loro denominatore, che
+una misura non applicabile resti un trattino e non uno zero — perché un giudice sbagliato produce
+numeri peggio che inutili.
 
 La CI (`.github/workflows/ci.yml`) gira su Windows — l'app è una finestra WebView2 e i test Rust
 istanziano il runtime di Tauri — e fa quattro cose: `tsc` + build, test del frontend, `clippy -D
