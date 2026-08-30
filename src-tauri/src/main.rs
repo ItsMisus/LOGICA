@@ -4,6 +4,10 @@
 mod ai;
 mod assistant;
 mod attachments;
+/// La misura su cento richieste. Esiste solo nelle build di test: non e' un
+/// pezzo del programma, e nell'eseguibile che si installa non ci deve stare.
+#[cfg(test)]
+mod eval;
 mod memory;
 mod rag;
 mod server;
