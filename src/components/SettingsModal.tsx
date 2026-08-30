@@ -13,6 +13,8 @@ import {
   type IndexStatus,
   type Preferences,
   type Toast,
+  type UpdateInfo,
+  type UpdateProgress,
 } from "../types";
 
 interface Props {
@@ -67,8 +69,48 @@ export default function SettingsModal({
   // L'indicizzazione dura minuti: senza l'avanzamento sembrerebbe piantata.
   useEffect(() => subscribe<IndexProgress>("index-progress", setProgress), []);
 
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [download, setDownload] = useState<UpdateProgress | null>(null);
+
+  // Il controllo parte da solo all'apertura delle impostazioni: e' l'unico
+  // punto da cui si aggiorna, e chiedere due clic per sapere la versione
+  // installata sarebbe uno di troppo.
+  useEffect(() => {
+    if (!isDesktop) return;
+    call<UpdateInfo>("check_update")
+      .then(setUpdate)
+      .catch(() => setUpdate(null));
+  }, []);
+
+  useEffect(() => subscribe<UpdateProgress>("update-progress", setDownload), []);
+
   const claudeReady = status?.claude ?? false;
   const ollamaReady = status?.ollama ?? false;
+
+  async function checkUpdate() {
+    setChecking(true);
+    try {
+      const found = await call<UpdateInfo>("check_update");
+      setUpdate(found);
+      if (!found.available && !found.reason) onNotice("info", "Sei già all'ultima versione.");
+    } catch (e) {
+      onNotice("error", String(e));
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  async function installUpdate() {
+    setDownload({ downloaded: 0, total: null });
+    try {
+      // Se va bene non torna: il processo si riavvia da solo.
+      await call("install_update");
+    } catch (e) {
+      onNotice("error", String(e));
+      setDownload(null);
+    }
+  }
 
   async function buildIndex() {
     setIndexing(true);
@@ -227,6 +269,48 @@ export default function SettingsModal({
             {!isDesktop && " Si cambia solo dal PC."}
           </p>
         </section>
+
+        {isDesktop && (
+          <section>
+            <h3>Aggiornamenti</h3>
+            <p className="note">
+              {update ? `Versione installata: ${update.current}.` : "Controllo della versione…"}
+            </p>
+
+            {update?.reason && <p className="note">{update.reason}</p>}
+
+            {update?.available && (
+              <>
+                <p className="note">
+                  Disponibile la <strong>{update.version}</strong>.
+                  {update.notes ? ` ${update.notes}` : ""}
+                </p>
+                <p className="note">
+                  Installandola l'app si chiude e si riapre da sola: su Windows l'installer
+                  sostituisce l'eseguibile in uso.
+                </p>
+              </>
+            )}
+
+            {download && (
+              <p className="note">
+                Scaricato {Math.round(download.downloaded / 1024)} KB
+                {download.total ? ` di ${Math.round(download.total / 1024)} KB` : ""}
+              </p>
+            )}
+
+            <div className="row-actions">
+              <button className="tool-btn" disabled={checking} onClick={() => void checkUpdate()}>
+                {checking ? "Controllo…" : "Controlla aggiornamenti"}
+              </button>
+              {update?.available && (
+                <button className="tool-btn primary" onClick={() => void installUpdate()}>
+                  Installa e riavvia
+                </button>
+              )}
+            </div>
+          </section>
+        )}
 
         <section>
           <h3>Documenti</h3>

@@ -1,7 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permessi minimi: finestra principale + dialog per scegliere la cartella",
-  "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "description": "Permessi minimi: finestra principale, dialog per scegliere i file, aggiornamento firmato",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "updater:default",
+    "process:allow-restart"
+  ]
 }

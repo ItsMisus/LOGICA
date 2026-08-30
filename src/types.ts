@@ -177,6 +177,24 @@ export interface IndexProgress {
   file: string;
 }
 
+/** Esito del controllo aggiornamenti. */
+export interface UpdateInfo {
+  available: boolean;
+  /** La versione installata adesso. */
+  current: string;
+  version: string | null;
+  notes: string | null;
+  /** Perché non si è potuto controllare; `null` se il controllo è andato. */
+  reason: string | null;
+}
+
+/** Quanto è stato scaricato (evento `update-progress`). */
+export interface UpdateProgress {
+  downloaded: number;
+  /** `null` quando il server non dichiara la dimensione. */
+  total: number | null;
+}
+
 /* ------------------------------ configurazione ----------------------------- */
 
 export interface Preferences {

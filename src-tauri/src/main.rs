@@ -10,6 +10,7 @@ mod server;
 mod storage;
 mod summary;
 mod tools;
+mod updater;
 mod web;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -182,6 +183,32 @@ fn forget_fact(fact_id: String) -> Result<(), String> {
 #[tauri::command]
 fn clear_memory() -> Result<(), String> {
     memory::clear()
+}
+
+/* ------------------------------ aggiornamenti ----------------------------- */
+
+/// Quanto e' stato scaricato dell'aggiornamento.
+#[derive(Clone, Serialize)]
+struct UpdateProgress {
+    downloaded: u64,
+    /// Quanto pesa in tutto, quando il server lo dichiara.
+    total: Option<u64>,
+}
+
+#[tauri::command]
+async fn check_update(app: AppHandle) -> updater::UpdateInfo {
+    updater::check(&app).await
+}
+
+/// Scarica, installa e riavvia. Non torna: se va bene, il processo e' gia'
+/// finito quando il frontend leggerebbe la risposta.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let emitter = app.clone();
+    updater::install(&app, move |downloaded, total| {
+        emit_all(&emitter, "update-progress", UpdateProgress { downloaded, total });
+    })
+    .await
 }
 
 /* -------------------------------- documenti ------------------------------- */
@@ -433,8 +460,20 @@ fn main() {
         eprintln!("[logica] impossibile preparare ~/.logica: {e}");
     }
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+
+    // L'aggiornatore si registra solo se questa build sa dove guardare e con
+    // quale chiave verificare la firma. Senza, sarebbe un pezzo acceso che non
+    // puo' fare niente. Indirizzo e chiave non stanno in tauri.conf.json ma
+    // vengono passati a ogni controllo (vedi `updater`), cosi' il repository
+    // non contiene ne' un indirizzo finto ne' una chiave finta.
+    if updater::configured() {
+        builder = builder
+            .plugin(tauri_plugin_process::init())
+            .plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder
         .manage(AppState::default())
         .setup(|app| {
             // Accensione automatica, se l'utente l'ha chiesta e una password
@@ -474,6 +513,8 @@ fn main() {
             get_config,
             set_config,
             check_ai_status,
+            check_update,
+            install_update,
             get_memory,
             forget_fact,
             clear_memory,

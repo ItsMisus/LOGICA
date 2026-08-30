@@ -310,6 +310,37 @@ prompt, quindi con la **Claude API** esce in rete (con Ollama no); e l'interrutt
 l'indirizzo del motore, **non si tocca dal browser** — una sessione remota non può accendersi da
 sola la lettura dei file.
 
+## Aggiornamenti
+
+In **Impostazioni → Aggiornamenti** l'app dice la versione installata, controlla se ce n'è una
+nuova e, se c'è, la scarica e si riavvia. Su Windows il riavvio è parte dell'operazione: l'installer
+sostituisce l'eseguibile in uso, e tenere aperta la finestra vecchia vorrebbe dire avere in memoria
+una versione che sul disco non c'è più.
+
+L'aggiornatore ha bisogno di due cose che **non stanno in questo repository**: l'indirizzo da cui
+scaricare e la chiave pubblica con cui si verifica la firma del pacchetto. Non ci sono valori finti
+nel codice: se mancano — e mancano in ogni build fatta da chi clona — il plugin non viene nemmeno
+registrato e il comando lo dice, invece di provare a scaricare da un indirizzo inesistente o di
+verificare una firma con una chiave inventata.
+
+Per pubblicare aggiornamenti:
+
+```powershell
+# Una volta sola: la coppia di chiavi. La privata NON va nel repository.
+npx tauri signer generate -w $env:USERPROFILE\.tauri\logica.key
+
+# A ogni release: la privata firma, la pubblica finisce nella build.
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $env:USERPROFILE\.tauri\logica.key -Raw
+$env:LOGICA_UPDATE_ENDPOINT = "https://esempio.it/logica/latest.json"
+$env:LOGICA_UPDATE_PUBKEY   = "<contenuto di logica.key.pub>"
+npm run tauri build
+```
+
+`latest.json` è il file che l'app va a leggere: versione, note, e per ogni piattaforma l'indirizzo
+del pacchetto con la sua firma. Indirizzo e chiave arrivano al codice come `option_env!`, cioè al
+momento della compilazione, e vengono passati a ogni controllo invece di stare in `tauri.conf.json`
+— quel file sta nel repository, e ci finirebbero dentro dati che valgono solo per chi pubblica.
+
 ---
 
 ## Storage
@@ -427,6 +458,7 @@ file-organizer-ai/
     ├── memory.rs                i fatti che l'assistente si porta fra una chat e l'altra
     ├── summary.rs               il riassunto della parte vecchia di una chat lunga
     ├── rag.rs                   indice dei documenti e ricerca per significato
+    ├── updater.rs               controllo, download e riavvio dell'aggiornamento
     ├── ai.rs                    configurazione del motore AI e stato della connessione
     └── storage.rs               ~/.logica: chat, ricerca, esportazione, preferenze
 ```
@@ -450,11 +482,13 @@ file-organizer-ai/
 | `get_config` / `set_config` | — / `config` | `Config` / `—` |
 | `get_memory` / `forget_fact` / `clear_memory` | — / `factId` / — | `Fact[]` / `—` / `—` |
 | `index_status` / `build_index` / `clear_index` | — / `ollamaUrl` / — | `IndexStatus` (le ultime due solo desktop) |
+| `check_update` / `install_update` | — | `UpdateInfo` / `—` (solo desktop) |
 | `check_ai_status` | `ollamaUrl` | `{ ollama, claude, models }` |
 
 Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta;
 `assistant-status` (`{ chat_id, text }`), cosa sta facendo l'app prima di scrivere; e
-`index-progress` (`{ done, total, file }`) durante l'indicizzazione dei documenti.
+`index-progress` (`{ done, total, file }`) durante l'indicizzazione dei documenti, e
+`update-progress` (`{ downloaded, total }`) mentre si scarica un aggiornamento.
 
 ## Test
 
@@ -462,7 +496,7 @@ Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta
 npm run check                                # tipi + 16 test del frontend
 
 cd src-tauri
-cargo test                                   # 92 test offline
+cargo test                                   # 94 test offline
 cargo test -- --ignored live_ollama_stream   # streaming vero contro Ollama
 cargo test -- --ignored live_search          # ricerca vera (DuckDuckGo/Bing)
 cargo test -- --ignored live_research        # ricerca + lettura delle pagine
