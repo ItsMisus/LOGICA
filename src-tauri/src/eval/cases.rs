@@ -18,7 +18,7 @@
 //! solo domande con risposta premia il modello che risponde sempre.
 
 /// A quale parte del programma appartiene il caso.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Category {
     Chat,
     Memoria,

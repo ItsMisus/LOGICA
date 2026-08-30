@@ -51,7 +51,7 @@ impl Tally {
             t.hallucinated += o.hallucinated as usize;
             t.failures += o.failure.is_some() as usize;
             t.calls += o.tool_calls;
-            t.times.push(o.elapsed);
+            t.times.push(o.elapsed());
             // Le misure che non valgono per tutti i casi contano solo dove
             // c'erano: un denominatore gonfiato falsa la percentuale.
             if let Some(ok) = o.tool_ok {
@@ -279,9 +279,9 @@ mod tests {
 
     fn outcome(category: Category, passed: bool) -> Outcome {
         Outcome {
-            id: "prova",
+            id: "prova".to_string(),
             category,
-            prompt: "domanda",
+            prompt: "domanda".to_string(),
             answer: "risposta".to_string(),
             correct: passed,
             tool_ok: None,
@@ -290,7 +290,7 @@ mod tests {
             web_ok: None,
             language_ok: true,
             hallucinated: false,
-            elapsed: Duration::from_secs(1),
+            seconds: 1.0,
             failure: None,
         }
     }

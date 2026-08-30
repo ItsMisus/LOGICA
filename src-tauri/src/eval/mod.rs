@@ -53,9 +53,16 @@
 //! Cento richieste contro un modello da 30 miliardi di parametri durano piu' di
 //! un'ora. Il filtro per categoria serve a rifare una parte sola dopo una
 //! modifica, senza ripagare tutto il conto.
+//!
+//! Ogni esito viene scritto su disco appena arriva, e un lavoro interrotto
+//! riprende da dove era rimasto invece di ricominciare. La prima esecuzione
+//! intera e' stata fermata a trentasette richieste su cento e non ha lasciato
+//! niente: un'ora di calcolo buttata perche' il rapporto si scriveva solo alla
+//! fine. Per ricominciare da zero apposta: `FOAI_EVAL_FRESH=1`.
 
 pub mod cases;
 pub mod fixtures;
+mod journal;
 mod report;
 mod score;
 
@@ -66,13 +73,17 @@ use crate::ai::AiConfig;
 use cases::{Case, Category, CASES};
 
 /// Com'e' andata una richiesta.
-#[derive(Debug, Clone)]
+///
+/// I campi sono posseduti e non prestati dal dataset perche' ogni esito viene
+/// scritto su disco appena arriva: un lavoro di un'ora e mezza che tiene tutto
+/// in memoria fino alla fine perde tutto se lo fermi a meta', ed e' successo.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Outcome {
-    pub id: &'static str,
+    pub id: String,
     pub category: Category,
     /// Cosa e' stato chiesto, per rileggere il rapporto senza il dataset a
     /// fianco.
-    pub prompt: &'static str,
+    pub prompt: String,
     /// La risposta, intera. Nel rapporto compare solo per i casi caduti, ma
     /// serve tenerla per poterli guardare.
     pub answer: String,
@@ -86,12 +97,18 @@ pub struct Outcome {
     pub web_ok: Option<bool>,
     pub language_ok: bool,
     pub hallucinated: bool,
-    pub elapsed: Duration,
+    /// Quanto ci ha messo, in secondi. Un numero e non una `Duration` per
+    /// poterlo rileggere dal giornale senza cerimonie.
+    pub seconds: f32,
     /// Il motivo, quando non e' arrivato niente.
     pub failure: Option<String>,
 }
 
 impl Outcome {
+    pub fn elapsed(&self) -> Duration {
+        Duration::from_secs_f32(self.seconds)
+    }
+
     /// Un caso e' passato quando ha risposto giusto, con gli strumenti giusti,
     /// nella lingua giusta, senza inventarsi niente. Tenere le condizioni
     /// insieme evita il conforto di guardare solo la percentuale piu' bella.
@@ -233,13 +250,22 @@ mod tests {
         let cases = wanted_cases();
         prepare(&models).expect("preparazione");
 
+        if std::env::var("FOAI_EVAL_FRESH").is_ok() {
+            journal::reset();
+        }
+        let done = journal::already_done(&journal::load());
+        if !done.is_empty() {
+            eprintln!("riprendo: {} richieste erano gia' state fatte\n", done.len());
+        }
+
         let runtime = tokio::runtime::Runtime::new().expect("runtime tokio");
-        let mut everything: Vec<(String, Vec<Outcome>)> = Vec::new();
 
         for model in &models {
             eprintln!("\n=== {model} — {} richieste ===", cases.len());
-            let mut outcomes = Vec::with_capacity(cases.len());
             for (i, case) in cases.iter().enumerate() {
+                if done.contains(&(model.clone(), case.id.to_string())) {
+                    continue;
+                }
                 let outcome = run_case(&runtime, case, model);
                 eprintln!(
                     "  [{:>3}/{}] {:<9} {:<22} {}  {:.1}s",
@@ -248,12 +274,29 @@ mod tests {
                     case.id,
                     case.category.label(),
                     if outcome.passed() { "ok    " } else { "CADUTO" },
-                    outcome.elapsed.as_secs_f32()
+                    outcome.seconds
                 );
-                outcomes.push(outcome);
+                // Su disco subito: se il lavoro viene fermato adesso, questa
+                // richiesta non va rifatta.
+                if let Err(e) = journal::append(model, &outcome) {
+                    eprintln!("    (non annotata: {e})");
+                }
             }
-            everything.push((model.clone(), outcomes));
         }
+
+        // Il rapporto si costruisce da quello che sta sul giornale, non da
+        // quello che e' rimasto in memoria: cosi' comprende anche le richieste
+        // fatte nelle esecuzioni di prima.
+        let entries = journal::load();
+        let mut everything: Vec<(String, Vec<Outcome>)> = Vec::new();
+        for model in &models {
+            let outcomes: Vec<Outcome> =
+                entries.iter().filter(|e| &e.model == model).map(|e| e.outcome.clone()).collect();
+            if !outcomes.is_empty() {
+                everything.push((model.clone(), outcomes));
+            }
+        }
+        assert!(!everything.is_empty(), "nessuna richiesta e' arrivata: Ollama e' acceso?");
 
         let text = report::write(&everything);
         println!("\n{text}");
@@ -265,6 +308,9 @@ mod tests {
             eprintln!("\nrapporto in {}", file.display());
         }
 
+        // Il giornale resta: e' il grezzo da cui il rapporto e' stato ricavato,
+        // e serve per riprendere quando l'esecuzione era parziale.
+        eprintln!("giornale in {}", journal::path().display());
         fixtures::clean();
 
         // Il test non impone una soglia: serve a produrre la misura, non a

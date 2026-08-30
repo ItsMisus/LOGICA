@@ -88,9 +88,9 @@ pub fn turn(
     elapsed: Duration,
 ) -> Outcome {
     let base = |answer: String, failure: Option<String>| Outcome {
-        id: case.id,
+        id: case.id.to_string(),
         category: case.category,
-        prompt: case.prompt,
+        prompt: case.prompt.to_string(),
         answer,
         correct: false,
         tool_ok: None,
@@ -99,7 +99,7 @@ pub fn turn(
         web_ok: None,
         language_ok: true,
         hallucinated: false,
-        elapsed,
+        seconds: elapsed.as_secs_f32(),
         failure,
     };
 
@@ -146,9 +146,9 @@ pub fn memory(case: &Case, facts: Vec<String>, elapsed: Duration) -> Outcome {
         if case.expect.is_empty() { facts.is_empty() } else { all_groups(&joined, case.expect) };
 
     Outcome {
-        id: case.id,
+        id: case.id.to_string(),
         category: case.category,
-        prompt: case.prompt,
+        prompt: case.prompt.to_string(),
         answer: if facts.is_empty() { "(niente)".to_string() } else { joined.clone() },
         correct,
         tool_ok: None,
@@ -157,7 +157,7 @@ pub fn memory(case: &Case, facts: Vec<String>, elapsed: Duration) -> Outcome {
         web_ok: None,
         language_ok: is_italian(&joined),
         hallucinated: forbidden(&joined, case.forbid),
-        elapsed,
+        seconds: elapsed.as_secs_f32(),
         failure: None,
     }
 }
@@ -254,9 +254,9 @@ mod tests {
     #[test]
     fn a_case_that_falls_on_any_count_does_not_pass() {
         let mut outcome = Outcome {
-            id: "prova",
+            id: "prova".to_string(),
             category: Category::Chat,
-            prompt: "",
+            prompt: String::new(),
             answer: String::new(),
             correct: true,
             tool_ok: Some(true),
@@ -265,7 +265,7 @@ mod tests {
             web_ok: Some(true),
             language_ok: true,
             hallucinated: false,
-            elapsed: Duration::ZERO,
+            seconds: 0.0,
             failure: None,
         };
         assert!(outcome.passed());
