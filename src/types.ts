@@ -306,7 +306,7 @@ export const DEFAULT_CONFIG: Config = {
 
 /** Modello con cui si calcolano i vettori dei documenti. Deve restare
  *  allineato a `EMBED_MODEL` in `src-tauri/src/rag.rs`. */
-export const EMBED_MODEL = "nomic-embed-text";
+export const EMBED_MODEL = "bge-m3";
 
 /** Quanti fatti tiene la memoria. Deve restare allineata a `MAX_FACTS` in
  *  `src-tauri/src/memory.rs`. */

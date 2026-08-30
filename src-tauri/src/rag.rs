@@ -22,15 +22,21 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// Modello di embedding. Piccolo (137M), gira su CPU, ed e' fatto per questo
-/// mestiere: un modello di chat usato come embedder da vettori peggiori.
-pub const EMBED_MODEL: &str = "nomic-embed-text";
-
-/// `nomic-embed-text` e' addestrato con questi prefissi e senza rende meno.
-/// Non sono decorazione: dicono al modello se sta leggendo una domanda o un
-/// documento, e i due casi finiscono in punti diversi dello spazio.
-const QUERY_PREFIX: &str = "search_query: ";
-const DOCUMENT_PREFIX: &str = "search_document: ";
+/// Modello di embedding: multilingue, ed e' il motivo per cui e' questo.
+///
+/// Prima qui c'era `nomic-embed-text`, piu' piccolo e piu' veloce. Provato
+/// sui documenti veri ha sbagliato: su cinque domande italiane ne ha capite
+/// tre, e «quante uova per il dolce?» pescava un biglietto aereo invece della
+/// ricetta. E' addestrato in inglese — sullo stesso corpus tradotto azzeccava
+/// tutte e cinque con distacchi larghi. Un assistente che parla italiano ha
+/// bisogno di un embedder che capisca l'italiano.
+///
+/// `bge-m3` sullo stesso corpus: cinque su cinque, e le domande che coi
+/// documenti non c'entrano niente scendono a 0.26-0.37 invece di restare
+/// appiccicate a quelle giuste. Costa piu' spazio (568M invece di 137M,
+/// vettori da 1024 numeri invece di 768) e indicizza piu' piano; e' il prezzo
+/// di risposte che citano il documento giusto.
+pub const EMBED_MODEL: &str = "bge-m3";
 
 /// Caratteri per pezzo. Piu' corto perde il contesto della frase, piu' lungo
 /// annacqua il vettore: un pezzo che parla di cinque cose non somiglia bene a
@@ -56,10 +62,16 @@ const TOP_K: usize = 5;
 
 /// Quanto deve somigliare un pezzo alla domanda per finire nel prompt.
 ///
-/// Senza questa soglia, ogni domanda tirerebbe dentro i cinque pezzi meno
-/// lontani anche quando non c'entrano niente, e il modello risponderebbe a una
-/// domanda di cucina citando un preventivo.
-const MIN_SCORE: f32 = 0.45;
+/// Misurato, non scelto: sul corpus di prova la domanda pertinente peggiore
+/// prende 0.483 e la non pertinente migliore 0.374. La soglia sta in mezzo,
+/// spostata un po' verso il basso perche' un estratto di troppo costa meno di
+/// una risposta mancata — il prompt dice comunque al modello di ammettere
+/// quando negli estratti la risposta non c'e'.
+///
+/// Il numero vale per `EMBED_MODEL`: cambiando modello va rimisurato, perche'
+/// ogni embedder ha la sua scala. Con `nomic-embed-text` non esisteva nessun
+/// valore buono, ed e' il motivo per cui il modello e' cambiato.
+const MIN_SCORE: f32 = 0.42;
 
 /// L'indicizzazione di un documento lungo puo' durare minuti su CPU: il
 /// timeout e' per richiesta, non per l'intero lavoro.
@@ -450,9 +462,7 @@ pub async fn build(
         }
 
         for batch in parts.chunks(EMBED_BATCH) {
-            let prefixed: Vec<String> =
-                batch.iter().map(|p| format!("{DOCUMENT_PREFIX}{p}")).collect();
-            let computed = embed(ollama_url, &prefixed).await?;
+            let computed = embed(ollama_url, batch).await?;
             for (piece, vector) in batch.iter().zip(computed) {
                 if index.dim == 0 {
                     index.dim = vector.len();
@@ -494,30 +504,46 @@ pub async fn search(question: &str, ollama_url: &str) -> Vec<Hit> {
     }
     let Ok(vectors) = load_vectors(index.dim, index.pieces.len()) else { return Vec::new() };
 
-    let query = format!("{QUERY_PREFIX}{question}");
-    let Ok(embedded) = embed(ollama_url, &[query]).await else { return Vec::new() };
+    let Ok(embedded) = embed(ollama_url, std::slice::from_ref(&question.to_string())).await else {
+        return Vec::new();
+    };
     let Some(needle) = embedded.into_iter().next() else { return Vec::new() };
     if needle.len() != index.dim {
         return Vec::new();
     }
 
-    let mut scored: Vec<(f32, usize)> = vectors
+    let scored: Vec<(f32, usize)> = vectors
         .iter()
         .enumerate()
         .map(|(i, v)| (similarity(&needle, v), i))
-        .filter(|(score, _)| *score >= MIN_SCORE)
         .collect();
-    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
 
-    scored
+    keep(scored)
         .into_iter()
-        .take(TOP_K)
         .map(|(score, i)| Hit {
-            path: index.pieces[i].path.clone(),
+            path: display_path(&index.pieces[i].path),
             text: index.pieces[i].text.clone(),
             score,
         })
         .collect()
+}
+
+/// Quali pezzi tenere, dati i punteggi di tutti.
+///
+/// Separata da `search` perche' e' la regola vera e si puo' provare senza
+/// Ollama: `search` intorno e' solo lettura dell'indice e una chiamata di rete.
+fn keep(mut scored: Vec<(f32, usize)>) -> Vec<(f32, usize)> {
+    scored.retain(|(score, _)| *score >= MIN_SCORE);
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    scored.truncate(TOP_K);
+    scored
+}
+
+/// Il percorso senza il prefisso `\\?\` che Windows aggiunge canonicalizzando.
+/// Questo finisce nel prompt e sotto gli occhi dell'utente: deve essere il
+/// percorso che riconosce, non la sua forma interna.
+fn display_path(path: &str) -> String {
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
 }
 
 /// Gli estratti come blocco di prompt.
@@ -572,15 +598,170 @@ mod tests {
         assert!(!is_document(Path::new("non_esiste_davvero.txt")));
     }
 
+    /// I punteggi veri misurati con `bge-m3` sul corpus di prova: cinque
+    /// domande che c'entrano coi documenti e quattro che non c'entrano. E' il
+    /// caso su cui `nomic-embed-text` sbagliava, quindi vive qui come test.
+    #[test]
+    fn a_question_the_documents_do_not_answer_gets_no_excerpts() {
+        // «che tempo fa domani a Milano?», «qual e' la capitale del
+        // Giappone?», «chi ha vinto il campionato nel 1998?»: i punteggi
+        // migliori misurati sono questi, e nessuno deve passare.
+        for score in [0.374, 0.313, 0.308, 0.258] {
+            assert!(
+                keep(vec![(score, 0)]).is_empty(),
+                "{score} e' il punteggio di una domanda che coi documenti non c'entra"
+            );
+        }
+    }
+
+    #[test]
+    fn a_question_the_documents_answer_gets_them() {
+        // I cinque punteggi delle domande pertinenti, la peggiore per prima.
+        for score in [0.483, 0.509, 0.550, 0.620, 0.636] {
+            assert_eq!(keep(vec![(score, 0)]).len(), 1, "{score} e' una risposta che c'e' nei documenti");
+        }
+    }
+
+    #[test]
+    fn several_pieces_of_the_same_topic_stay_together() {
+        // Piu' pezzi dello stesso documento rispondono alla domanda: passano
+        // tutti, non solo il primo.
+        let scored = vec![(0.62, 0), (0.58, 1), (0.51, 2), (0.30, 3)];
+        let kept = keep(scored);
+        assert_eq!(kept.len(), 3);
+        assert!(kept[0].0 >= kept[1].0, "i migliori devono venire prima");
+    }
+
+    #[test]
+    fn no_more_than_top_k_excerpts_reach_the_prompt() {
+        let many: Vec<(f32, usize)> = (0..20).map(|i| (0.9 - i as f32 * 0.001, i)).collect();
+        assert_eq!(keep(many).len(), TOP_K);
+    }
+
+    #[test]
+    fn nothing_above_the_threshold_gives_nothing() {
+        assert!(keep(vec![(0.3, 0), (0.2, 1)]).is_empty());
+        assert!(keep(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn the_windows_prefix_never_reaches_the_prompt() {
+        assert_eq!(display_path(r"\\?\C:\Users\ada\note.txt"), r"C:\Users\ada\note.txt");
+        // Un percorso gia' normale resta com'e'.
+        assert_eq!(display_path(r"C:\Users\ada\note.txt"), r"C:\Users\ada\note.txt");
+    }
+
+    /// `src/types.ts` ripete il nome del modello per scriverlo nelle
+    /// impostazioni, e un commento chiede di tenerlo allineato. Un commento non
+    /// e' un controllo: cambiando modello qui, la finestra diceva ancora
+    /// all'utente di scaricare quello vecchio.
+    #[test]
+    fn the_frontend_names_the_same_embedding_model() {
+        let types = std::fs::read_to_string("../src/types.ts").expect("src/types.ts");
+        let expected = format!("export const EMBED_MODEL = \"{EMBED_MODEL}\";");
+        assert!(
+            types.contains(&expected),
+            "src/types.ts non dice {EMBED_MODEL}: le impostazioni direbbero all'utente di scaricare il modello sbagliato"
+        );
+    }
+
     #[test]
     fn a_missing_embed_model_says_what_to_type() {
         let hint = missing_embed_model_hint(reqwest::StatusCode::NOT_FOUND, "");
-        assert!(hint.contains("ollama pull nomic-embed-text"));
+        assert!(hint.contains(&format!("ollama pull {EMBED_MODEL}")));
     }
 
     #[test]
     fn an_index_whose_vectors_do_not_match_is_refused() {
         // dim 0 o nessun pezzo: niente da leggere, niente errore.
         assert!(load_vectors(0, 0).unwrap().is_empty());
+    }
+
+    /// I test qui sopra provano i pezzi presi da soli. Questo prova la cosa
+    /// per cui esiste il modulo: trovare un documento **per significato**,
+    /// quando la domanda non contiene nessuna delle sue parole.
+    ///
+    /// La domanda dice "restituire una cosa comprata"; il documento dice
+    /// "reso" e "quattordici giorni" e non usa nessuna di quelle parole. Una
+    /// ricerca testuale non troverebbe niente. Serve `ollama serve` e il
+    /// modello scaricato:
+    /// `cargo test -- --ignored live_documents --nocapture`
+    #[test]
+    #[ignore]
+    fn live_documents_are_found_by_meaning() {
+        use crate::storage::tests::TempHome;
+
+        let _home = TempHome::new("documenti_live");
+        crate::storage::ensure_layout().expect("layout");
+
+        let dir = std::env::temp_dir().join("logica_documenti_live");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("cartella");
+        std::fs::write(
+            dir.join("condizioni.txt"),
+            "Il reso e' accettato entro quattordici giorni dalla consegna,              purche' l'imballo sia integro. Le spese di spedizione restano a              carico dell'acquirente salvo prodotto difettoso.",
+        )
+        .expect("documento");
+        // Il secondo documento serve a provare la soglia: deve restare fuori.
+        std::fs::write(
+            dir.join("ricetta.txt"),
+            "Per la torta di mele servono tre uova, duecento grammi di farina              e mezzo litro di latte. Cuocere in forno a centottanta gradi per              quaranta minuti.",
+        )
+        .expect("documento");
+
+        let mut config = crate::storage::load_config();
+        config.monitored_folders = vec![dir.to_string_lossy().to_string()];
+        crate::storage::save_config(&config).expect("config");
+
+        let url = crate::ai::AiConfig::default().ollama_url;
+        let runtime = tokio::runtime::Runtime::new().expect("runtime tokio");
+
+        let status = runtime
+            .block_on(build(&url, &mut |_, _, _| {}))
+            .expect("indicizzazione fallita");
+        assert_eq!(status.files, 2, "non ha indicizzato tutti i file");
+        assert!(status.pieces >= 2, "nessun pezzo indicizzato");
+
+        let hits = runtime.block_on(search(
+            "posso restituire una cosa che ho comprato se non mi piace?",
+            &url,
+        ));
+
+        eprintln!(
+            "trovati: {:?}",
+            hits.iter().map(|h| (h.path.clone(), h.score)).collect::<Vec<_>>()
+        );
+        assert!(!hits.is_empty(), "la ricerca per significato non ha trovato niente");
+        assert!(
+            hits[0].path.contains("condizioni"),
+            "il primo risultato non e' il documento giusto: {}",
+            hits[0].path
+        );
+        assert!(
+            !hits.iter().any(|h| h.path.contains("ricetta")),
+            "la torta di mele e' finita in una domanda sui resi: la soglia non filtra"
+        );
+        assert!(
+            !hits[0].path.starts_with(r"\\?\"),
+            "il percorso interno di Windows e' finito nel prompt: {}",
+            hits[0].path
+        );
+
+        // Una domanda a cui i documenti non rispondono non deve tirare dentro
+        // niente: e' il caso che `nomic-embed-text` sbagliava sempre.
+        let nulla = runtime.block_on(search("chi ha vinto il campionato nel 1998?", &url));
+        assert!(
+            nulla.is_empty(),
+            "una domanda che coi documenti non c'entra ha pescato {:?}",
+            nulla.iter().map(|h| (h.path.clone(), h.score)).collect::<Vec<_>>()
+        );
+
+        // Seconda indicizzazione senza toccare i file: deve riusare tutto.
+        let again = runtime
+            .block_on(build(&url, &mut |_, _, _| {}))
+            .expect("seconda indicizzazione");
+        assert_eq!(again.pieces, status.pieces, "l'indice incrementale ha cambiato i pezzi");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

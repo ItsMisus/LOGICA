@@ -226,9 +226,20 @@ vettori **una volta sola**. A ogni domanda si trasforma anche la domanda e si pr
 vicini, se somigliano abbastanza; sotto la soglia non entra niente nel prompt, invece di infilarci i
 cinque pezzi meno lontani e far rispondere il modello a una domanda di cucina citando un preventivo.
 
+Il modello di embedding è `bge-m3`, ed è multilingue per necessità. Prima era `nomic-embed-text`,
+più piccolo e più veloce: provato sui documenti veri sbagliava, perché è addestrato in inglese e
+questo assistente parla italiano. Su cinque domande italiane ne capiva tre, e «quante uova per il
+dolce?» pescava un biglietto aereo invece della ricetta; sullo stesso corpus tradotto in inglese le
+azzeccava tutte e cinque con distacchi larghi. Peggio ancora, le domande che coi documenti non
+c'entravano niente prendevano punteggi alti quanto quelle giuste — «qual è la capitale del
+Giappone?» arrivava a 0.655 contro lo 0.600 di una domanda pertinente — quindi *nessuna* soglia
+poteva separarle. Con `bge-m3` le domande fuori tema scendono a 0.26-0.37 contro lo 0.48 della
+peggiore pertinente, e la soglia torna a essere un numero che significa qualcosa.
+
 I vettori li calcola **sempre Ollama**, anche quando rispondi con la Claude API: Anthropic non ha un
 endpoint di embedding, e mandare fuori ogni pezzo di ogni documento per indicizzarlo sarebbe il
-contrario di quello che serve qui. Serve `ollama pull nomic-embed-text` — 137M, gira su CPU.
+contrario di quello che serve qui. Serve `ollama pull bge-m3` — 568M, gira su CPU, e indicizza più piano del modello inglese che
+c'era prima: è il prezzo di risposte che citano il documento giusto.
 
 ```
 ~/.logica/index/
