@@ -441,7 +441,7 @@ pub async fn build(
             continue;
         }
 
-        let read = crate::attachments::read_all(&[key.clone()]);
+        let read = crate::attachments::read_all(std::slice::from_ref(&key));
         let Some(text) = read.into_iter().next().and_then(|a| a.text) else { continue };
         let parts = split(&text);
         if parts.is_empty() {
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn a_long_text_is_cut_with_an_overlap() {
-        let text: String = std::iter::repeat('a').take(2_000).collect();
+        let text: String = "a".repeat(2_000);
         let parts = split(&text);
         assert!(parts.len() > 1);
         assert_eq!(parts[0].chars().count(), CHUNK_CHARS);

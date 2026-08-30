@@ -148,6 +148,23 @@ function parseBlocks(source: string): Block[] {
 const INLINE =
   /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\n]+\*)|(~~[^~]+~~)|(\[[^\]]+\]\([^)\s]+\))|(https?:\/\/[^\s<>()]+)/g;
 
+/**
+ * L'indirizzo di un link, se è di uno schema che si può aprire.
+ *
+ * React protegge dall'HTML iniettato ma non da un `href`: `javascript:` in un
+ * link scritto dal modello sarebbe codice che parte al clic dell'utente. Qui
+ * passano solo gli schemi che in una risposta hanno senso; tutto il resto
+ * resta testo, visibile e inerte.
+ */
+function safeHref(url: string): string | null {
+  const scheme = url.match(/^\s*([a-zA-Z][a-zA-Z0-9+.-]*):/);
+  if (!scheme) {
+    // Nessuno schema: è un percorso relativo, non porta da nessuna parte.
+    return null;
+  }
+  return ["http", "https", "mailto"].includes(scheme[1].toLowerCase()) ? url.trim() : null;
+}
+
 function inline(text: string, keyPrefix: string): ReactNode[] {
   const out: ReactNode[] = [];
   let last = 0;
@@ -174,9 +191,10 @@ function inline(text: string, keyPrefix: string): ReactNode[] {
       out.push(<em key={key}>{token.slice(1, -1)}</em>);
     } else if (token.startsWith("[")) {
       const link = token.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
+      const href = link && safeHref(link[2]);
       out.push(
-        link ? (
-          <a key={key} href={link[2]} target="_blank" rel="noreferrer" title={link[2]}>
+        link && href ? (
+          <a key={key} href={href} target="_blank" rel="noreferrer" title={href}>
             {link[1]}
           </a>
         ) : (

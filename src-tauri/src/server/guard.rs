@@ -254,7 +254,7 @@ mod tests {
 
         let buono = dir.join("a.txt").to_string_lossy().to_string();
         let cattivo = "C:/Windows/notepad.exe".to_string();
-        assert!(ensure_all_within(&[buono.clone()]).is_ok());
+        assert!(ensure_all_within(std::slice::from_ref(&buono)).is_ok());
         assert!(ensure_all_within(&[buono, cattivo]).is_err());
     }
 }

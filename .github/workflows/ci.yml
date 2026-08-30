@@ -1,0 +1,53 @@
+name: CI
+
+# Windows e basta: l'app è una finestra Tauri con WebView2, e i test Rust
+# istanziano il runtime di Tauri. Su Linux servirebbero GTK e WebKit installati
+# a mano per provare esattamente le stesse cose.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Installa le dipendenze
+        run: npm ci
+
+      # `tsc` è il primo a cadere quando una struct Rust e la sua interfaccia
+      # TypeScript si allontanano: gira prima dei test, che sono più lenti.
+      - name: Tipi e build del frontend
+        run: npm run build
+
+      - name: Test del frontend
+        run: npm run test
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # La cache di cargo vale minuti: senza, ogni esecuzione ricompila axum,
+      # rustls e tutto il resto da zero.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Niente `cargo fmt --check`: il codice e' formattato a mano piu' stretto
+      # di quanto rustfmt lascerebbe (un match corto su una riga sola), e
+      # riformattarlo tutto per far passare un controllo cambierebbe migliaia
+      # di righe senza migliorarne nessuna.
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Solo i test offline: quelli marcati `#[ignore]` chiamano Ollama e i
+      # motori di ricerca veri, e in CI non ci sono né l'uno né gli altri.
+      - name: Test del backend
+        working-directory: src-tauri
+        run: cargo test

@@ -624,18 +624,14 @@ async fn ask(system: &str, prompt: &str, cfg: &AiConfig) -> Option<String> {
 fn links_in(message: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut rest = message;
-    loop {
-        let Some(pos) = [rest.find("http://"), rest.find("https://")].into_iter().flatten().min()
-        else {
-            break;
-        };
+    while let Some(pos) = [rest.find("http://"), rest.find("https://")].into_iter().flatten().min()
+    {
         let tail = &rest[pos..];
         let end = tail
             .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`'))
             .unwrap_or(tail.len());
         // La punteggiatura che chiude la frase non fa parte dell'indirizzo.
-        let url = tail[..end]
-            .trim_end_matches(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'));
+        let url = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
         if url.len() > 10 && !out.iter().any(|u| u == url) {
             out.push(url.to_string());
         }
@@ -657,10 +653,8 @@ fn clean_query(raw: &str) -> Option<String> {
         let value = value.trim().trim_matches(|c: char| c == '"' || c == '\'').trim();
         match label.trim().to_lowercase().as_str() {
             "serve" => needs = Some(value.starts_with("si") || value.starts_with("sì") || value.starts_with("yes")),
-            "query" | "ricerca" => {
-                if value != "-" && !value.is_empty() {
-                    query = Some(value.trim_end_matches('.').trim().to_string());
-                }
+            "query" | "ricerca" if value != "-" && !value.is_empty() => {
+                query = Some(value.trim_end_matches('.').trim().to_string());
             }
             _ => {}
         }
@@ -875,6 +869,10 @@ async fn gather_web(
 /// che arriva: e' li' che il frontend riceve l'effetto macchina da scrivere.
 /// `on_status` racconta cosa sta facendo l'app prima di iniziare a scrivere
 /// (ricerca, pagine aperte): quei secondi sono di silenzio.
+// Otto parametri sono tanti, ma sono tutti diversi e tutti obbligatori:
+// raccoglierli in una struct vorrebbe dire costruirla in un punto solo, il
+// comando `talk`, e leggerla in un punto solo, qui. Nessun guadagno.
+#[allow(clippy::too_many_arguments)]
 pub async fn stream_reply(
     chat_id: &str,
     message: &str,

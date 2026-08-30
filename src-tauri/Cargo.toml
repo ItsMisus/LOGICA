@@ -3,7 +3,8 @@ name = "file-organizer-ai"
 version = "0.1.0"
 description = "LOGICA: assistente personale con AI locale (Ollama) o Claude API"
 edition = "2021"
-rust-version = "1.77"
+# `Option::is_none_or`, usato in assistant.rs, e' stabile da 1.82.
+rust-version = "1.82"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

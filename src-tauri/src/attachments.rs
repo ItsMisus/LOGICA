@@ -423,7 +423,7 @@ fn read_zip_entry<R: std::io::Read + std::io::Seek>(
 /// La tabella condivisa: un elemento `<si>` per stringa, con dentro uno o piu'
 /// `<t>` (Excel spezza in piu' pezzi una cella con formattazione mista).
 fn shared_strings(xml: &str) -> Vec<String> {
-    blocks(xml, "<si", "</si>").map(|inner| texts_in(inner)).collect()
+    blocks(xml, "<si", "</si>").map(texts_in).collect()
 }
 
 /// Le righe di un foglio, come TSV.

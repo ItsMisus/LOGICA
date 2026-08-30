@@ -597,6 +597,10 @@ async fn assets(State(ctx): State<Arc<Ctx>>, uri: Uri) -> Response {
 
 /* --------------------------------- aiutini -------------------------------- */
 
+// L'errore e' una `Response` gia' pronta, che e' grande. Boxarla vorrebbe dire
+// scartarla subito dopo in ogni punto di chiamata: qui l'errore risale di un
+// livello solo, e finisce nel corpo della risposta HTTP.
+#[allow(clippy::result_large_err)]
 fn parse<T: for<'de> Deserialize<'de>>(body: Value) -> Result<T, Response> {
     serde_json::from_value(body)
         .map_err(|e| fail(StatusCode::BAD_REQUEST, format!("Parametri non validi: {e}")))

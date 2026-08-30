@@ -447,6 +447,8 @@ Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta
 ## Test
 
 ```bash
+npm run check                                # tipi + 16 test del frontend
+
 cd src-tauri
 cargo test                                   # 92 test offline
 cargo test -- --ignored live_ollama_stream   # streaming vero contro Ollama
@@ -458,3 +460,16 @@ cargo test -- --ignored live_web_flow        # giro completo: decide, cerca, ris
 I test live con Ollama richiedono `ollama serve` e il modello scaricato; `FOAI_TEST_MODEL` cambia
 il modello usato dai test. Quelli di ricerca richiedono internet: `live_search` fallisce se
 entrambi i motori rispondono con una pagina di blocco, e in quel caso il parsing va riguardato.
+
+Dal frontend si prova quello che si può provare senza un browser: il parser Markdown, che è scritto
+a mano ed è il pezzo con più probabilità di rompersi in silenzio, e le funzioni pure che traducono
+`engine` nei campi che il backend si aspetta. I test si rendono con `renderToStaticMarkup` e girano
+su Node: aggiungere jsdom costerebbe una dipendenza e qualche secondo a ogni esecuzione senza
+provare niente di più. Il test che conta di più è quello che verifica che il modello **non** possa
+iniettare HTML: se un giorno qualcuno introduce `dangerouslySetInnerHTML` per comodità, cade lì.
+
+La CI (`.github/workflows/ci.yml`) gira su Windows — l'app è una finestra WebView2 e i test Rust
+istanziano il runtime di Tauri — e fa quattro cose: `tsc` + build, test del frontend, `clippy -D
+warnings`, `cargo test`. Niente `cargo fmt --check`: il codice è formattato a mano più stretto di
+quanto rustfmt lascerebbe, e riformattarlo tutto per far passare un controllo cambierebbe migliaia
+di righe senza migliorarne nessuna.
