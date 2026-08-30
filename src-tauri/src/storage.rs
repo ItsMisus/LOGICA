@@ -35,6 +35,9 @@ pub struct ChatMessage {
     /// Pagine consultate su internet per scrivere questa risposta.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sources: Option<Vec<crate::web::SearchHit>>,
+    /// Cartelle e file guardati sul disco per scrivere questa risposta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<crate::tools::ToolUse>>,
 }
 
 fn default_message_type() -> String {
@@ -83,6 +86,11 @@ pub struct Preferences {
     /// dalle versioni precedenti: li' vale acceso.
     #[serde(default = "enabled")]
     pub web_search: bool,
+    /// L'assistente puo' guardare dentro le cartelle autorizzate. Spento
+    /// finche' non lo si accende: e' l'unica preferenza che apre una porta sui
+    /// file dell'utente.
+    #[serde(default)]
+    pub file_tools: bool,
 }
 
 fn enabled() -> bool {
@@ -97,6 +105,7 @@ impl Default for Preferences {
             ollama_url: DEFAULT_OLLAMA_URL.to_string(),
             ollama_model: "llama3.1:8b".to_string(),
             web_search: true,
+            file_tools: false,
         }
     }
 }
@@ -519,6 +528,7 @@ pub(crate) mod tests {
                 message_type: "text".to_string(),
                 attachments: None,
                 sources: None,
+                tools: None,
             }],
         }
     }
@@ -575,6 +585,7 @@ pub(crate) mod tests {
                 message_type: "text".to_string(),
                 attachments: None,
                 sources: None,
+                tools: None,
             })
             .collect();
         chat

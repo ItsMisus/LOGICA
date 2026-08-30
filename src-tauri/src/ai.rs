@@ -33,6 +33,11 @@ pub struct AiConfig {
     /// dall'utente vengono aperti comunque: quelli sono una richiesta esplicita.
     #[serde(default = "default_web_search")]
     pub web_search: bool,
+    /// L'assistente puo' elencare, leggere e cercare dentro le cartelle
+    /// autorizzate. Spento di default: chi lo accende sa che sta dando a un
+    /// modello la possibilita' di leggere i propri file.
+    #[serde(default)]
+    pub file_tools: bool,
 }
 
 fn default_web_search() -> bool {
@@ -55,6 +60,7 @@ impl Default for AiConfig {
             ollama_model: default_model(),
             user_preferences: String::new(),
             web_search: default_web_search(),
+            file_tools: false,
         }
     }
 }

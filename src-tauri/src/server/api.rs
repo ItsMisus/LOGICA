@@ -440,7 +440,7 @@ async fn command(
 
         "get_preferences" => ok(json!(crate::get_preferences())),
         "set_preferences" => match parse::<PreferencesArgs>(body) {
-            Ok(a) => match keep_ollama_url(a.preferences) {
+            Ok(a) => match keep_engine_settings(a.preferences) {
                 Ok(p) => result(crate::set_preferences(p)),
                 Err(e) => fail(StatusCode::FORBIDDEN, e),
             },
@@ -500,11 +500,21 @@ fn keep_allowlist(incoming: Config) -> Result<Config, String> {
 
 /// Stessa ragione per l'indirizzo del motore AI: cambiarlo da remoto vorrebbe
 /// dire scegliere dove finiscono i contenuti delle conversazioni.
-fn keep_ollama_url(incoming: Preferences) -> Result<Preferences, String> {
+///
+/// E stessa ragione per gli strumenti sui file: il recinto non si sposta da
+/// remoto, ma accendere da soli la lettura dentro il recinto sarebbe il modo
+/// di aggirarlo lo stesso, una risposta alla volta.
+fn keep_engine_settings(incoming: Preferences) -> Result<Preferences, String> {
     let current = crate::storage::load_preferences();
     if incoming.ollama_url != current.ollama_url {
         return Err(
             "L'indirizzo del motore AI si modifica solo dalla finestra di LOGICA sul PC."
+                .to_string(),
+        );
+    }
+    if incoming.file_tools != current.file_tools {
+        return Err(
+            "L'accesso ai file si accende e si spegne solo dalla finestra di LOGICA sul PC."
                 .to_string(),
         );
     }

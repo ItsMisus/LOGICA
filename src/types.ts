@@ -39,6 +39,14 @@ export interface WebSource {
   snippet: string;
 }
 
+/** Uno strumento che l'assistente ha usato sul disco per rispondere. */
+export interface ToolUse {
+  /** `list_dir` | `read_file` | `find_files` | `search_in_files` */
+  name: string;
+  /** Il percorso guardato o il testo cercato, gia' pronto da mostrare. */
+  detail: string;
+}
+
 export type ChatRole = "user" | "ai";
 export type ChatMessageType = "text" | "notification";
 
@@ -51,6 +59,8 @@ export interface ChatMessage {
   attachments?: Attachment[];
   /** Pagine consultate su internet per scrivere questa risposta. */
   sources?: WebSource[];
+  /** Cartelle e file guardati sul disco per scrivere questa risposta. */
+  tools?: ToolUse[];
 }
 
 export interface ChatMetadata {
@@ -89,6 +99,7 @@ export interface TalkReply {
   stopped: boolean;
   error: string | null;
   sources: WebSource[];
+  tools: ToolUse[];
 }
 
 /** Pezzo di risposta in arrivo durante lo streaming (evento `assistant-delta`). */
@@ -113,6 +124,9 @@ export interface Preferences {
   ollama_model: string;
   /** L'assistente puo' cercare su internet quando la risposta lo richiede. */
   web_search: boolean;
+  /** L'assistente puo' elencare, leggere e cercare dentro le cartelle
+   *  autorizzate. Spento finche' non lo si accende. */
+  file_tools: boolean;
 }
 
 export interface Config {
@@ -129,6 +143,7 @@ export interface AiConfig {
   ollama_model: string;
   user_preferences: string;
   web_search: boolean;
+  file_tools: boolean;
 }
 
 export interface AiStatus {
@@ -149,6 +164,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   ollama_url: "http://localhost:11434",
   ollama_model: "llama3.1:8b",
   web_search: true,
+  file_tools: false,
 };
 
 export const DEFAULT_CONFIG: Config = {

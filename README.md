@@ -6,7 +6,8 @@ sul disco in `~/.logica/`.
 
 Il motore è **Ollama in locale** (default, offline e gratis) oppure la **Claude API** (opzionale).
 Quando una domanda ha bisogno di dati aggiornati, Logica **cerca su internet** da sola e risponde
-citando le pagine che ha letto.
+citando le pagine che ha letto. Se le autorizzi una cartella, **guarda anche dentro i tuoi file**:
+li elenca, li legge e ci cerca dentro, in sola lettura.
 
 ```
 ┌──────────────────┬─────────────────────────────────────────┐
@@ -87,7 +88,9 @@ Il modello usato è `claude-opus-5`. Senza chiave l'app resta su Ollama.
 
 Il carattere dell'assistente sta tutto in `SYSTEM_PROMPT` (`src-tauri/src/assistant.rs`): risposta
 prima delle premesse, niente adulazione, una domanda sola quando la richiesta è ambigua, e il
-divieto di fingere accessi che non ha (file, rete, altri programmi).
+divieto di fingere accessi che non ha. Quel pezzo sui file ha due versioni, scelte a seconda che gli
+strumenti siano accesi o spenti: dire insieme "non puoi leggere niente" e "ecco le cartelle che puoi
+leggere" manda in confusione un modello piccolo.
 
 Scorciatoie: **Invio** manda, **Shift+Invio** va a capo, **Ctrl+N** apre una conversazione nuova.
 
@@ -141,9 +144,41 @@ Mentre cerca, la chat mostra cosa sta facendo (evento `assistant-status`): *Cerc
 *Leggo …*. Se la ricerca non trova niente o la rete è giù, il modello lo dice invece di inventare.
 
 L'interruttore sta in **Impostazioni → Internet** ed è acceso di default; da browser non si cambia,
-come il resto della configurazione del motore. Fuori esce **la query**, non i tuoi file. Gli
+come il resto della configurazione del motore. Fuori esce **la query**, non i tuoi file (quelli
+escono solo se accendi gli strumenti sui file *e* usi la Claude API). Gli
 indirizzi locali e di rete interna (`localhost`, `192.168.*`, `*.local`, `169.254.169.254`) sono
 rifiutati, anche dopo un redirect: il modello non può usare l'app per bussare ai servizi di casa.
+
+### Accesso ai file
+
+Di default l'assistente non vede niente del disco e lo dice. In **Impostazioni → File** si
+autorizzano una o più cartelle (dal dialogo di sistema, non scrivendo un percorso) e si accende
+l'interruttore: da quel momento il modello ha quattro strumenti, tutti in **sola lettura**.
+
+| Strumento | Cosa fa | Freni |
+|---|---|---|
+| `list_dir` | elenca una cartella: nomi, dimensioni, data | 200 voci |
+| `read_file` | legge un file: testo, sorgenti, PDF, DOCX | 12.000 caratteri, stessa lettura degli allegati |
+| `find_files` | cerca per pezzo di nome, nelle sottocartelle | 40 risultati, 6 livelli, 4.000 file visitati |
+| `search_in_files` | cerca un testo dentro i file, riga per riga | 40 righe, file oltre 2 MB e binari saltati |
+
+Il recinto è lo stesso dell'accesso da browser (`server/guard.rs`): un percorso fuori dalle cartelle
+autorizzate viene rifiutato prima di toccare il disco, `..` compreso, e un link simbolico che punta
+fuori non funziona come scorciatoia. `node_modules`, `.git`, `target` e simili non vengono nemmeno
+percorsi: costano minuti e non contengono mai la risposta.
+
+Il modello può fare fino a 6 giri di strumenti in un turno; all'ultimo gli strumenti gli vengono
+tolti, così conclude con quello che ha raccolto invece di chiedere ancora. Ogni esito torna al
+modello tagliato a 8.000 caratteri. Mentre guarda, la chat scrive cosa sta facendo (*Guardo in …*,
+*Leggo …*) e sotto la risposta restano i chip di quello che ha aperto, salvati nella chat.
+
+**Non può scrivere, spostare, rinominare o cancellare niente.** Una scrittura decisa da un modello
+locale senza una conferma davanti agli occhi non vale la comodità.
+
+Due cose da sapere prima di accendere l'interruttore: quello che il modello legge finisce nel
+prompt, quindi con la **Claude API** esce in rete (con Ollama no); e l'interruttore, come
+l'indirizzo del motore, **non si tocca dal browser** — una sessione remota non può accendersi da
+sola la lettura dei file.
 
 ---
 
@@ -152,7 +187,7 @@ rifiutati, anche dopo un redirect: il modello non può usare l'app per bussare a
 ```
 ~/.logica/
 ├── config.json              istruzioni personalizzate, cartelle raggiungibili dal browser
-├── preferences.json         tema, motore AI, URL e modello Ollama, ricerca su internet
+├── preferences.json         tema, motore AI, URL e modello Ollama, ricerca su internet, accesso ai file
 └── chats/
     └── chat_20260829_142530_a1b2.json
 ```
@@ -251,6 +286,7 @@ file-organizer-ai/
     ├── assistant.rs             prompt, streaming Ollama/Claude, ricerca web, titolo
     ├── web.rs                   ricerca (DuckDuckGo, Bing), pagine, HTML → testo
     ├── attachments.rs           allegati: testo, PDF, DOCX, immagini in base64
+    ├── tools.rs                 strumenti sui file: elenca, legge, cerca (sola lettura)
     ├── ai.rs                    configurazione del motore AI e stato della connessione
     └── storage.rs               ~/.logica: chat, ricerca, esportazione, preferenze
 ```
@@ -259,7 +295,7 @@ file-organizer-ai/
 
 | Comando | Argomenti (JS) | Ritorna |
 |---|---|---|
-| `talk` | `chatId`, `message`, `history`, `images`, `config` | `{ text, stopped, error, sources }` |
+| `talk` | `chatId`, `message`, `history`, `images`, `config` | `{ text, stopped, error, sources, tools }` |
 | `stop_talk` | — | — |
 | `suggest_title` | `question`, `answer`, `config` | `string \| null` |
 | `read_attachments` | `paths` | `Attachment[]` |
@@ -280,7 +316,7 @@ Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta
 
 ```bash
 cd src-tauri
-cargo test                                   # 49 test offline
+cargo test                                   # 71 test offline
 cargo test -- --ignored live_ollama_stream   # streaming vero contro Ollama
 cargo test -- --ignored live_search          # ricerca vera (DuckDuckGo/Bing)
 cargo test -- --ignored live_research        # ricerca + lettura delle pagine

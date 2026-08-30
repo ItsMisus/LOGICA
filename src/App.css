@@ -1557,6 +1557,38 @@ button {
   color: var(--faint);
 }
 
+/* Cartelle che l'assistente puo' leggere, nelle impostazioni. */
+.allowed-folders {
+  list-style: none;
+  margin: 10px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.allowed-folders li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+}
+
+/* Un percorso lungo non deve allargare la finestra delle impostazioni. */
+.allowed-folders span {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
 /* Interruttore delle impostazioni. */
 .switch {
   display: flex;

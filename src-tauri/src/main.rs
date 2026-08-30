@@ -6,6 +6,7 @@ mod assistant;
 mod attachments;
 mod server;
 mod storage;
+mod tools;
 mod web;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,6 +75,8 @@ struct TalkReply {
     error: Option<String>,
     /// Pagine consultate su internet per questa risposta.
     sources: Vec<web::SearchHit>,
+    /// Cartelle e file guardati sul disco per questa risposta.
+    tools: Vec<tools::ToolUse>,
 }
 
 /// Cosa sta facendo l'app prima di cominciare a scrivere: una ricerca, una
@@ -137,6 +140,7 @@ async fn talk(
         stopped: reply.stopped,
         error: reply.error,
         sources: reply.sources,
+        tools: reply.tools_used,
     })
 }
 

@@ -26,6 +26,7 @@ import {
   type StoredChat,
   type TalkReply,
   type Toast,
+  type ToolUse,
   type WebSource,
 } from "../types";
 
@@ -226,6 +227,7 @@ export default function ChatPage() {
       ollama_model: preferences.ollama_model,
       user_preferences: config.user_preferences,
       web_search: preferences.web_search,
+      file_tools: preferences.file_tools,
     }),
     [preferences, config.user_preferences],
   );
@@ -272,6 +274,8 @@ export default function ChatPage() {
         const aiMessage = message("ai", answer);
         const sources: WebSource[] = reply.sources ?? [];
         if (sources.length > 0) aiMessage.sources = sources;
+        const used: ToolUse[] = reply.tools ?? [];
+        if (used.length > 0) aiMessage.tools = used;
         const finalMessages = answer.length > 0 ? [...withUser, aiMessage] : withUser;
         // Il testo in streaming sparisce nello stesso momento in cui compare il
         // messaggio finito, altrimenti si vede due volte.

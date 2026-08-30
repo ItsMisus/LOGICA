@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 
 use crate::ai::{self, AiConfig, ChatTurn};
 use crate::attachments::Image;
+use crate::tools::{self, ToolCall, ToolUse};
 use crate::web;
 
 /// Come deve pensare e scrivere l'assistente. E' la parte che decide se le
@@ -37,9 +38,14 @@ COME SCRIVI
 COSA SEI E COSA NON PUOI FARE
 - Sei un assistente generale: qualsiasi argomento, dal codice alla vita di tutti i giorni.
 - Quando serve, l'app cerca su internet per te e ti mette i risultati sotto gli occhi in un blocco RISULTATI DAL WEB. Se quel blocco non c'e', non hai cercato niente: rispondi con quello che sai e dillo.
-- Non hai accesso ai file del computer, alla posta o ad altri programmi: vedi solo questa conversazione e gli allegati. Se ti chiedono di aprire o spostare qualcosa, dillo invece di fingere di averlo fatto.
-- L'organizzazione automatica dei file arrivera' in una versione futura dell'app: se te ne chiedono, spiega che non e' ancora attiva.
+- Non hai accesso alla posta o ad altri programmi.
 - Ricordi solo la chat corrente: le altre conversazioni non le vedi.";
+
+/// Cosa dire quando gli strumenti sui file sono spenti o non c'e' nessuna
+/// cartella autorizzata. Sta fuori dal prompt fisso perche' l'alternativa
+/// (l'elenco delle cartelle leggibili) la contraddirebbe riga per riga, e un
+/// modello piccolo davanti a due istruzioni opposte ne sceglie una a caso.
+const NO_FILE_ACCESS: &str = "Non hai accesso ai file del computer: vedi solo questa conversazione e gli allegati. Se ti chiedono di aprire, cercare o spostare qualcosa sul disco, dillo invece di fingere di averlo fatto; l'utente puo' autorizzare una cartella dalle impostazioni dell'app.";
 
 /// Timeout sull'intera risposta in streaming. Un 7B lento sta ben sotto,
 /// una connessione morta non tiene la UI in attesa per sempre.
@@ -48,6 +54,10 @@ const STREAM_TIMEOUT: Duration = Duration::from_secs(300);
 /// Turni di storico inviati al modello. Piu' in la' i modelli piccoli
 /// perdono comunque il filo e la latenza cresce.
 const MAX_HISTORY_TURNS: usize = 30;
+
+/// Caratteri di un esito di strumento rimandati al modello. Un `list_dir` su
+/// una cartella con dentro mezzo disco riempirebbe da solo tutto il contesto.
+const MAX_TOOL_OUTPUT: usize = 8_000;
 
 /// Finestra di contesto richiesta a Ollama: il default (2048) taglia le
 /// conversazioni lunghe a meta'.
@@ -119,12 +129,31 @@ pub struct Reply {
     /// Pagine consultate su internet per questa risposta. Vuoto quando non
     /// si e' cercato niente.
     pub sources: Vec<web::SearchHit>,
+    /// Strumenti sui file che il modello ha chiesto di usare in questo passo.
+    /// Vuoto in una risposta finita.
+    pub tool_calls: Vec<ToolCall>,
+    /// Cosa ha guardato sul disco per arrivare a questa risposta.
+    pub tools_used: Vec<ToolUse>,
+}
+
+impl Reply {
+    fn new(text: String, stopped: bool, error: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self { text, stopped, error, sources: Vec::new(), tool_calls, tools_used: Vec::new() }
+    }
 }
 
 /// Un pezzo di risposta letto dallo stream.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 enum Chunk {
     Text(String),
+    /// Chiamate complete, come le manda Ollama: nome e argomenti in un colpo
+    /// solo, a volte insieme a un pezzo di testo.
+    Tools { text: String, calls: Vec<ToolCall> },
+    /// Claude apre il blocco con nome e id, poi manda gli argomenti a pezzi di
+    /// JSON e infine lo chiude.
+    ToolStart { id: String, name: String },
+    ToolArgs(String),
+    ToolEnd,
     Done,
     Error(String),
     /// Riga di servizio (keep-alive SSE, evento senza testo): si ignora.
@@ -136,8 +165,13 @@ enum Chunk {
 /// `web_block` e' il materiale appena scaricato da internet, quando c'e'.
 /// Sta nel prompt di sistema e non in un messaggio dell'utente: cosi' non
 /// finisce nello storico della chat e non si porta dietro il turno dopo.
-fn system_prompt(cfg: &AiConfig, web_block: Option<&str>) -> String {
+fn system_prompt(cfg: &AiConfig, web_block: Option<&str>, file_tools: bool) -> String {
     let mut prompt = SYSTEM_PROMPT.to_string();
+    if file_tools {
+        prompt.push_str(&format!("\n\n{}", tools::roots_block()));
+    } else {
+        prompt.push_str(&format!("\n- {NO_FILE_ACCESS}"));
+    }
     prompt.push_str(&format!(
         "\n\nData di oggi: {}. Usala per capire riferimenti come 'oggi' o 'l'anno scorso'.",
         chrono::Local::now().format("%d/%m/%Y")
@@ -234,6 +268,14 @@ fn ollama_chunk(line: &str) -> Chunk {
         return Chunk::Error(format!("Ollama: {err}"));
     }
     let text = value["message"]["content"].as_str().unwrap_or("");
+
+    // Gli strumenti arrivano completi, spesso nello stesso pezzo che chiude la
+    // risposta: vanno letti prima del testo o si perdono.
+    let calls = ollama_tool_calls(&value["message"]["tool_calls"]);
+    if !calls.is_empty() {
+        return Chunk::Tools { text: text.to_string(), calls };
+    }
+
     if !text.is_empty() {
         return Chunk::Text(text.to_string());
     }
@@ -241,6 +283,27 @@ fn ollama_chunk(line: &str) -> Chunk {
         return Chunk::Done;
     }
     Chunk::Skip
+}
+
+/// `tool_calls` di Ollama. Gli argomenti sono un oggetto JSON, ma qualche
+/// modello (e qualche versione) li manda come stringa da riaprire.
+fn ollama_tool_calls(value: &serde_json::Value) -> Vec<ToolCall> {
+    let Some(list) = value.as_array() else { return Vec::new() };
+    list.iter()
+        .filter_map(|call| {
+            let function = &call["function"];
+            let name = function["name"].as_str()?.to_string();
+            let raw = &function["arguments"];
+            let input = match raw {
+                serde_json::Value::String(text) => {
+                    serde_json::from_str(text).unwrap_or(serde_json::json!({}))
+                }
+                serde_json::Value::Null => serde_json::json!({}),
+                other => other.clone(),
+            };
+            Some(ToolCall { id: String::new(), name, input })
+        })
+        .collect()
 }
 
 /// Una riga SSE dell'API Messages: solo le `data:` portano contenuto.
@@ -257,10 +320,28 @@ fn claude_chunk(line: &str) -> Chunk {
         return Chunk::Skip;
     };
     match value["type"].as_str().unwrap_or("") {
-        "content_block_delta" => match value["delta"]["text"].as_str() {
-            Some(text) if !text.is_empty() => Chunk::Text(text.to_string()),
-            _ => Chunk::Skip,
-        },
+        // Un blocco `tool_use` si apre con nome e id; gli argomenti arrivano
+        // dopo, a pezzi di JSON che da soli non sono riaprribili.
+        "content_block_start" => {
+            let block = &value["content_block"];
+            match (block["type"].as_str(), block["name"].as_str()) {
+                (Some("tool_use"), Some(name)) => Chunk::ToolStart {
+                    id: block["id"].as_str().unwrap_or_default().to_string(),
+                    name: name.to_string(),
+                },
+                _ => Chunk::Skip,
+            }
+        }
+        "content_block_delta" => {
+            if let Some(partial) = value["delta"]["partial_json"].as_str() {
+                return Chunk::ToolArgs(partial.to_string());
+            }
+            match value["delta"]["text"].as_str() {
+                Some(text) if !text.is_empty() => Chunk::Text(text.to_string()),
+                _ => Chunk::Skip,
+            }
+        }
+        "content_block_stop" => Chunk::ToolEnd,
         "message_stop" => Chunk::Done,
         "error" => Chunk::Error(format!(
             "Claude: {}",
@@ -283,10 +364,14 @@ async fn consume(
     let mut error = None;
     let mut buffer: Vec<u8> = Vec::new();
     let mut stream = res.bytes_stream();
+    let mut calls: Vec<ToolCall> = Vec::new();
+    // Blocco `tool_use` di Claude aperto e non ancora chiuso: nome, id e il
+    // JSON degli argomenti che si sta ancora accumulando.
+    let mut pending: Option<(String, String, String)> = None;
 
     while let Some(next) = stream.next().await {
         if cancel.load(Ordering::Relaxed) {
-            return Reply { text, stopped: true, error, sources: Vec::new() };
+            return Reply::new(text, true, error, Vec::new());
         }
         let bytes = match next {
             Ok(b) => b,
@@ -307,11 +392,33 @@ async fn consume(
                     on_delta(&delta);
                     text.push_str(&delta);
                 }
-                Chunk::Done => return Reply { text, stopped: false, error, sources: Vec::new() },
-                Chunk::Error(e) => {
-                    error = Some(e);
-                    return Reply { text, stopped: false, error, sources: Vec::new() };
+                Chunk::Tools { text: delta, calls: found } => {
+                    if !delta.is_empty() {
+                        on_delta(&delta);
+                        text.push_str(&delta);
+                    }
+                    calls.extend(found);
                 }
+                Chunk::ToolStart { id, name } => pending = Some((id, name, String::new())),
+                Chunk::ToolArgs(partial) => {
+                    if let Some((_, _, args)) = pending.as_mut() {
+                        args.push_str(&partial);
+                    }
+                }
+                // Chiude anche i blocchi di testo: senza niente in sospeso non
+                // c'e' nulla da fare.
+                Chunk::ToolEnd => {
+                    if let Some((id, name, args)) = pending.take() {
+                        let input = if args.trim().is_empty() {
+                            serde_json::json!({})
+                        } else {
+                            serde_json::from_str(&args).unwrap_or(serde_json::json!({}))
+                        };
+                        calls.push(ToolCall { id, name, input });
+                    }
+                }
+                Chunk::Done => return Reply::new(text, false, error, calls),
+                Chunk::Error(e) => return Reply::new(text, false, Some(e), calls),
                 Chunk::Skip => {}
             }
         }
@@ -319,12 +426,22 @@ async fn consume(
 
     // Ultima riga senza '\n' finale.
     if !buffer.is_empty() {
-        if let Chunk::Text(delta) = parse(&String::from_utf8_lossy(&buffer)) {
-            on_delta(&delta);
-            text.push_str(&delta);
+        match parse(&String::from_utf8_lossy(&buffer)) {
+            Chunk::Text(delta) => {
+                on_delta(&delta);
+                text.push_str(&delta);
+            }
+            Chunk::Tools { text: delta, calls: found } => {
+                if !delta.is_empty() {
+                    on_delta(&delta);
+                    text.push_str(&delta);
+                }
+                calls.extend(found);
+            }
+            _ => {}
         }
     }
-    Reply { text, stopped: false, error, sources: Vec::new() }
+    Reply::new(text, false, error, calls)
 }
 
 /* ------------------------------ chiamate HTTP ----------------------------- */
@@ -334,18 +451,22 @@ async fn stream_ollama(
     system: &str,
     messages: &[serde_json::Value],
     temperature: f32,
+    tools: Option<&[serde_json::Value]>,
     cancel: &AtomicBool,
     on_delta: &mut impl FnMut(&str),
 ) -> Result<Reply, String> {
     let mut all = vec![serde_json::json!({ "role": "system", "content": system })];
     all.extend_from_slice(messages);
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": cfg.ollama_model,
         "messages": all,
         "stream": true,
         "options": { "temperature": temperature, "num_ctx": OLLAMA_CONTEXT }
     });
+    if let Some(tools) = tools {
+        body["tools"] = serde_json::json!(tools);
+    }
 
     let client = reqwest::Client::builder()
         .timeout(STREAM_TIMEOUT)
@@ -382,13 +503,14 @@ async fn stream_claude(
     system: &str,
     messages: &[serde_json::Value],
     temperature: f32,
+    tools: Option<&[serde_json::Value]>,
     cancel: &AtomicBool,
     on_delta: &mut impl FnMut(&str),
 ) -> Result<Reply, String> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "ANTHROPIC_API_KEY non impostata: imposta la chiave oppure usa Ollama.".to_string())?;
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": ai::CLAUDE_MODEL,
         "max_tokens": 4096,
         "system": system,
@@ -396,6 +518,9 @@ async fn stream_claude(
         "temperature": temperature,
         "stream": true
     });
+    if let Some(tools) = tools {
+        body["tools"] = serde_json::json!(tools);
+    }
 
     let client = reqwest::Client::builder()
         .timeout(STREAM_TIMEOUT)
@@ -430,9 +555,9 @@ async fn ask(system: &str, prompt: &str, cfg: &AiConfig) -> Option<String> {
     let cancel = AtomicBool::new(false);
     let mut sink = |_: &str| {};
     let reply = if cfg.use_premium_ai {
-        stream_claude(system, &messages, SERVICE_TEMPERATURE, &cancel, &mut sink).await
+        stream_claude(system, &messages, SERVICE_TEMPERATURE, None, &cancel, &mut sink).await
     } else {
-        stream_ollama(cfg, system, &messages, SERVICE_TEMPERATURE, &cancel, &mut sink).await
+        stream_ollama(cfg, system, &messages, SERVICE_TEMPERATURE, None, &cancel, &mut sink).await
     }
     .ok()?;
     Some(reply.text)
@@ -714,16 +839,139 @@ pub async fn stream_reply(
         None => (None, Vec::new()),
     };
 
-    let system = system_prompt(cfg, block.as_deref());
-    let messages = history_messages(history, message, images, cfg.use_premium_ai);
+    // Gli strumenti si accendono solo se l'utente li vuole e se c'e' davvero
+    // una cartella autorizzata: dichiararli a vuoto fa perdere al modello sei
+    // giri contro lo stesso rifiuto.
+    let file_tools = cfg.file_tools && tools::available();
+    let system = system_prompt(cfg, block.as_deref(), file_tools);
+    let mut messages = history_messages(history, message, images, cfg.use_premium_ai);
 
-    let mut reply = if cfg.use_premium_ai {
-        stream_claude(&system, &messages, CHAT_TEMPERATURE, cancel, &mut on_delta).await
-    } else {
-        stream_ollama(cfg, &system, &messages, CHAT_TEMPERATURE, cancel, &mut on_delta).await
-    }?;
+    // Testo gia' mandato al frontend nei passi precedenti: e' partito con gli
+    // eventi `assistant-delta`, quindi deve ritrovarsi anche nella risposta
+    // salvata, o la chat ricaricata risulterebbe monca.
+    let mut carried = String::new();
+    let mut tools_used: Vec<ToolUse> = Vec::new();
+    let mut step = 0usize;
+
+    let mut reply = loop {
+        // All'ultimo giro gli strumenti si tolgono: il modello deve concludere
+        // con quello che ha raccolto invece di chiedere ancora.
+        let offer_tools = file_tools && step < tools::MAX_STEPS;
+        let step_reply =
+            run_turn(cfg, &system, &messages, offer_tools, cancel, &mut on_delta).await?;
+
+        if step_reply.tool_calls.is_empty() || step_reply.stopped || !offer_tools {
+            break step_reply;
+        }
+
+        carried.push_str(&step_reply.text);
+        messages.push(assistant_with_tools(&step_reply, cfg.use_premium_ai));
+
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        for call in &step_reply.tool_calls {
+            on_status(&tools::status_line(call));
+            let output = tools::run(call);
+            tools_used.push(ToolUse::of(call));
+            results.push(tool_result(call, &output, cfg.use_premium_ai));
+        }
+        // Claude vuole tutti gli esiti in un solo messaggio utente, Ollama uno
+        // per chiamata con ruolo `tool`.
+        if cfg.use_premium_ai {
+            messages.push(serde_json::json!({ "role": "user", "content": results }));
+        } else {
+            messages.extend(results);
+        }
+        step += 1;
+    };
+
+    reply.text = format!("{carried}{}", reply.text);
     reply.sources = sources;
+    reply.tools_used = tools_used;
     Ok(reply)
+}
+
+/// Un giro di modello, con o senza strumenti dichiarati.
+///
+/// Se la richiesta con gli strumenti viene rifiutata si riprova una volta
+/// senza: le versioni vecchie di Ollama non sanno rispondere in streaming
+/// quando ci sono `tools`, e in quel caso e' meglio una risposta senza accesso
+/// ai file che nessuna risposta.
+async fn run_turn(
+    cfg: &AiConfig,
+    system: &str,
+    messages: &[serde_json::Value],
+    offer_tools: bool,
+    cancel: &AtomicBool,
+    on_delta: &mut impl FnMut(&str),
+) -> Result<Reply, String> {
+    let declared = if !offer_tools {
+        None
+    } else if cfg.use_premium_ai {
+        Some(tools::claude_tools())
+    } else {
+        Some(tools::ollama_tools())
+    };
+
+    let attempt = if cfg.use_premium_ai {
+        stream_claude(system, messages, CHAT_TEMPERATURE, declared.as_deref(), cancel, on_delta).await
+    } else {
+        stream_ollama(cfg, system, messages, CHAT_TEMPERATURE, declared.as_deref(), cancel, on_delta)
+            .await
+    };
+
+    match attempt {
+        Err(e) if declared.is_some() => {
+            eprintln!("[logica] strumenti sui file rifiutati dal motore, riprovo senza: {e}");
+            if cfg.use_premium_ai {
+                stream_claude(system, messages, CHAT_TEMPERATURE, None, cancel, on_delta).await
+            } else {
+                stream_ollama(cfg, system, messages, CHAT_TEMPERATURE, None, cancel, on_delta).await
+            }
+        }
+        other => other,
+    }
+}
+
+/// Il messaggio dell'assistente che ha chiesto gli strumenti, da rimettere
+/// nello storico prima degli esiti.
+fn assistant_with_tools(reply: &Reply, premium: bool) -> serde_json::Value {
+    if premium {
+        let mut parts: Vec<serde_json::Value> = Vec::new();
+        // Un blocco di testo vuoto fa rifiutare la richiesta dall'API.
+        if !reply.text.trim().is_empty() {
+            parts.push(serde_json::json!({ "type": "text", "text": reply.text }));
+        }
+        for call in &reply.tool_calls {
+            parts.push(serde_json::json!({
+                "type": "tool_use",
+                "id": call.id,
+                "name": call.name,
+                "input": call.input,
+            }));
+        }
+        serde_json::json!({ "role": "assistant", "content": parts })
+    } else {
+        let calls: Vec<serde_json::Value> = reply
+            .tool_calls
+            .iter()
+            .map(|c| serde_json::json!({ "function": { "name": c.name, "arguments": c.input } }))
+            .collect();
+        serde_json::json!({ "role": "assistant", "content": reply.text, "tool_calls": calls })
+    }
+}
+
+/// L'esito di uno strumento nel formato che il motore si aspetta.
+fn tool_result(call: &ToolCall, output: &str, premium: bool) -> serde_json::Value {
+    let output = truncate(output, MAX_TOOL_OUTPUT);
+    if premium {
+        serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": call.id,
+            "content": output,
+        })
+    } else {
+        serde_json::json!({ "role": "tool", "tool_name": call.name, "content": output })
+    }
 }
 
 /// Titolo breve per la conversazione, chiesto al modello dopo il primo
@@ -824,13 +1072,99 @@ mod tests {
     #[test]
     fn user_instructions_reach_the_prompt() {
         let cfg = AiConfig { user_preferences: "  parlami in modo tecnico  ".to_string(), ..AiConfig::default() };
-        let prompt = system_prompt(&cfg, None);
+        let prompt = system_prompt(&cfg, None, false);
         assert!(prompt.contains("parlami in modo tecnico"));
         assert!(prompt.contains("Data di oggi"));
 
         // Senza istruzioni non si aggiunge una sezione vuota.
-        let plain = system_prompt(&AiConfig::default(), None);
+        let plain = system_prompt(&AiConfig::default(), None, false);
         assert!(!plain.contains("Istruzioni scritte dall'utente"));
+    }
+
+    #[test]
+    fn file_access_is_described_once_and_in_one_verse_only() {
+        let closed = system_prompt(&AiConfig::default(), None, false);
+        assert!(closed.contains("Non hai accesso ai file"));
+        assert!(!closed.contains("STRUMENTI SUI FILE"));
+
+        let open = system_prompt(&AiConfig::default(), None, true);
+        assert!(open.contains("STRUMENTI SUI FILE"));
+        assert!(!open.contains("Non hai accesso ai file"));
+    }
+
+    #[test]
+    fn ollama_tool_calls_are_read_with_the_text_that_comes_with_them() {
+        let line = r#"{"message":{"role":"assistant","content":"guardo","tool_calls":[{"function":{"name":"list_dir","arguments":{"path":"C:\\Documenti"}}}]},"done":false}"#;
+        match ollama_chunk(line) {
+            Chunk::Tools { text, calls } => {
+                assert_eq!(text, "guardo");
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].name, "list_dir");
+                assert_eq!(calls[0].input["path"], "C:\\Documenti");
+            }
+            other => panic!("atteso Tools, ottenuto {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ollama_arguments_survive_arriving_as_a_string() {
+        let line = r#"{"message":{"content":"","tool_calls":[{"function":{"name":"read_file","arguments":"{\"path\":\"/tmp/a.txt\"}"}}]}}"#;
+        match ollama_chunk(line) {
+            Chunk::Tools { calls, .. } => assert_eq!(calls[0].input["path"], "/tmp/a.txt"),
+            other => panic!("atteso Tools, ottenuto {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_builds_a_tool_call_out_of_three_events() {
+        assert_eq!(
+            claude_chunk(r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"find_files","input":{}}}"#),
+            Chunk::ToolStart { id: "toolu_1".to_string(), name: "find_files".to_string() }
+        );
+        assert_eq!(
+            claude_chunk(r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"name\":"}}"#),
+            Chunk::ToolArgs("{\"name\":".to_string())
+        );
+        assert_eq!(claude_chunk(r#"data: {"type":"content_block_stop","index":1}"#), Chunk::ToolEnd);
+        // Il testo normale continua a passare come prima.
+        assert_eq!(
+            claude_chunk(r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}"#),
+            Chunk::Text("ok".to_string())
+        );
+    }
+
+    #[test]
+    fn tool_results_take_the_shape_each_engine_wants() {
+        let call = ToolCall {
+            id: "toolu_1".to_string(),
+            name: "list_dir".to_string(),
+            input: serde_json::json!({ "path": "/dati" }),
+        };
+        let claude = tool_result(&call, "una riga", true);
+        assert_eq!(claude["type"], "tool_result");
+        assert_eq!(claude["tool_use_id"], "toolu_1");
+
+        let ollama = tool_result(&call, "una riga", false);
+        assert_eq!(ollama["role"], "tool");
+        assert_eq!(ollama["tool_name"], "list_dir");
+    }
+
+    #[test]
+    fn an_empty_text_block_never_reaches_claude() {
+        let reply = Reply::new(
+            "   ".to_string(),
+            false,
+            None,
+            vec![ToolCall {
+                id: "toolu_1".to_string(),
+                name: "list_dir".to_string(),
+                input: serde_json::json!({ "path": "/dati" }),
+            }],
+        );
+        let message = assistant_with_tools(&reply, true);
+        let parts = message["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "tool_use");
     }
 
 
@@ -918,12 +1252,12 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
     #[test]
     fn web_material_reaches_the_prompt() {
         let block = "RISULTATI DAL WEB\n[1] Titolo - https://esempio.it\nriassunto";
-        let prompt = system_prompt(&AiConfig::default(), Some(block));
+        let prompt = system_prompt(&AiConfig::default(), Some(block), false);
         assert!(prompt.contains("https://esempio.it"));
         assert!(prompt.contains("Cita le fonti"));
 
         // Senza ricerca il prompt non parla di fonti da citare.
-        assert!(!system_prompt(&AiConfig::default(), None).contains("Cita le fonti"));
+        assert!(!system_prompt(&AiConfig::default(), None, false).contains("Cita le fonti"));
     }
 
     /// Il giro completo con internet, contro Ollama e contro il web vero:

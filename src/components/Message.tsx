@@ -32,6 +32,21 @@ function hostOf(url: string): string {
   }
 }
 
+/** Come si chiamano, per chi legge, gli strumenti sui file. */
+const TOOL_LABELS: Record<string, string> = {
+  list_dir: "Cartella",
+  read_file: "Letto",
+  find_files: "Cercato",
+  search_in_files: "Cercato nei file",
+};
+
+/** Nel chip sta il nome del file, non tutto il percorso: quello resta nel
+ *  titolo al passaggio del mouse. */
+function shortPath(detail: string): string {
+  const parts = detail.split(/[\\/]/).filter(Boolean);
+  return parts.length > 1 ? parts[parts.length - 1] : detail;
+}
+
 export default function Message({
   message,
   streaming,
@@ -171,6 +186,21 @@ export default function Message({
               <span className="source-num">{index + 1}</span>
               {hostOf(source.url)}
             </a>
+          ))}
+        </div>
+      )}
+
+      {!streaming && (message.tools?.length ?? 0) > 0 && (
+        <div className="sources">
+          <span className="sources-label">Sul disco</span>
+          {message.tools?.map((used, index) => (
+            <span
+              key={`${used.name}-${index}`}
+              className="source-chip"
+              title={`${TOOL_LABELS[used.name] ?? used.name}: ${used.detail}`}
+            >
+              {TOOL_LABELS[used.name] ?? used.name} {shortPath(used.detail)}
+            </span>
           ))}
         </div>
       )}

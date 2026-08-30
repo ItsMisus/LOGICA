@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 
 import { isDesktop } from "../api";
 import RemoteAccessPanel from "./RemoteAccessPanel";
@@ -35,6 +36,18 @@ export default function SettingsModal({
 
   const claudeReady = status?.claude ?? false;
   const ollamaReady = status?.ollama ?? false;
+
+  /// Il dialogo di sistema e' l'unico modo per autorizzare una cartella: un
+  /// percorso scritto a mano nel browser aggirerebbe il senso del recinto.
+  async function addFolder() {
+    const picked = await open({ directory: true, multiple: true, title: "Cartelle che Logica puo' leggere" });
+    if (!picked) return;
+    const chosen = Array.isArray(picked) ? picked : [picked];
+    setCfg((c) => ({
+      ...c,
+      monitored_folders: [...new Set([...c.monitored_folders, ...chosen])],
+    }));
+  }
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -133,6 +146,56 @@ export default function SettingsModal({
             scrivi tu vengono aperti comunque, anche con l'interruttore spento.
             {!isDesktop && " Si cambia solo dal PC."}
           </p>
+        </section>
+
+        <section>
+          <h3>File</h3>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={prefs.file_tools}
+              disabled={!isDesktop}
+              onChange={(e) => setPrefs((p) => ({ ...p, file_tools: e.target.checked }))}
+            />
+            <span>Lascia che Logica guardi nelle cartelle qui sotto</span>
+          </label>
+          <p className="note">
+            Con l'interruttore acceso l'assistente puo' elencare le cartelle, leggere i file e
+            cercarci dentro, ma solo qui: tutto il resto del disco resta fuori. Non puo' scrivere,
+            spostare o cancellare niente. Quello che legge finisce nel prompt del modello: con Claude
+            API esce quindi in rete, con Ollama resta sul PC.
+            {!isDesktop && " Le cartelle si scelgono solo dal PC."}
+          </p>
+
+          {cfg.monitored_folders.length === 0 ? (
+            <p className="note">Nessuna cartella autorizzata: finche' non ne aggiungi una, l'interruttore non fa niente.</p>
+          ) : (
+            <ul className="allowed-folders">
+              {cfg.monitored_folders.map((folder) => (
+                <li key={folder}>
+                  <span title={folder}>{folder}</span>
+                  <button
+                    className="tool-btn"
+                    disabled={!isDesktop}
+                    onClick={() =>
+                      setCfg((c) => ({
+                        ...c,
+                        monitored_folders: c.monitored_folders.filter((f) => f !== folder),
+                      }))
+                    }
+                  >
+                    Togli
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {isDesktop && (
+            <button className="tool-btn" onClick={() => void addFolder()}>
+              Aggiungi cartella
+            </button>
+          )}
         </section>
 
         <section>
