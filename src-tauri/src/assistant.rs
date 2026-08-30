@@ -1543,6 +1543,79 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
         eprintln!("risposta: {}\nfonti: {:?}", reply.text, reply.sources);
     }
 
+    /// Il giro completo degli strumenti sui file contro un modello vero: il
+    /// modello deve capire che per rispondere deve leggere, chiamare
+    /// `read_file`, e usare quello che ha letto.
+    ///
+    /// I test offline provano il parsing delle chiamate; questo prova che un
+    /// modello locale le produce davvero, che e' la parte che non si puo'
+    /// dedurre dal codice. Richiede `ollama serve` e un modello che sappia
+    /// usare gli strumenti:
+    /// `cargo test -- --ignored live_file_tools`
+    #[test]
+    #[ignore]
+    fn live_file_tools_read_a_real_file() {
+        use crate::storage::tests::TempHome;
+
+        // Home finta: la cartella autorizzata e le preferenze non devono
+        // toccare quelle vere dell'utente.
+        let _home = TempHome::new("strumenti_live");
+        crate::storage::ensure_layout().expect("layout");
+
+        let dir = std::env::temp_dir().join("logica_strumenti_live");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("cartella");
+        std::fs::write(
+            dir.join("promemoria.txt"),
+            "Numero di serie del gruppo elettrogeno: ZX-4417.",
+        )
+        .expect("file di prova");
+
+        let mut config = crate::storage::load_config();
+        config.monitored_folders = vec![dir.to_string_lossy().to_string()];
+        crate::storage::save_config(&config).expect("config");
+
+        let cfg = AiConfig {
+            ollama_model: std::env::var("FOAI_TEST_MODEL")
+                .unwrap_or_else(|_| "llama3.1:8b".to_string()),
+            file_tools: true,
+            // Ricerca web e memoria spente: qui si guarda una cosa sola.
+            web_search: false,
+            memory: false,
+            ..AiConfig::default()
+        };
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime tokio");
+        let cancel = AtomicBool::new(false);
+        let mut statuses: Vec<String> = Vec::new();
+        let reply = runtime
+            .block_on(stream_reply(
+                "test_live_tools",
+                "Nelle mie cartelle c'e' un file promemoria.txt. Aprilo e dimmi che numero di serie contiene.",
+                &[],
+                &[],
+                &cfg,
+                &cancel,
+                |_| {},
+                |s| statuses.push(s.to_string()),
+            ))
+            .expect("turno fallito");
+
+        eprintln!("stati: {statuses:?}\nrisposta: {}", reply.text);
+        assert!(
+            !reply.tools_used.is_empty(),
+            "il modello non ha usato nessuno strumento: {}",
+            reply.text
+        );
+        assert!(
+            reply.text.contains("ZX-4417"),
+            "il numero letto dal file non e' nella risposta: {}",
+            reply.text
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Turno vero contro Ollama: verifica lo streaming end-to-end, che i test
     /// offline non toccano. Richiede `ollama serve` e il modello scaricato:
     /// `cargo test -- --ignored live_ollama_stream`

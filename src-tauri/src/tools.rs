@@ -56,6 +56,41 @@ impl ToolCall {
     fn arg(&self, key: &str) -> Option<String> {
         self.input[key].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     }
+
+    /// Come `arg`, ma per i percorsi: passa da `tidy_path`.
+    fn path_arg(&self, key: &str) -> Option<String> {
+        self.arg(key).map(|p| tidy_path(&p)).filter(|p| !p.is_empty())
+    }
+}
+
+/// Raddrizza un percorso scritto da un modello.
+///
+/// Su Windows i modelli piccoli raddoppiano le barre rovesciate — scrivono
+/// `C:\\Users\\...` dentro un JSON che le raddoppia a sua volta — e quello che
+/// arriva qui e' un percorso che non esiste. Dentro un percorso vero due barre
+/// di fila non compaiono mai: compaiono solo in testa, nei percorsi di rete,
+/// e quelle si lasciano stare.
+fn tidy_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('"');
+    let (prefix, rest) = match trimmed.strip_prefix(r"\\") {
+        Some(rest) => (r"\\", rest),
+        None => ("", trimmed),
+    };
+
+    let mut out = String::with_capacity(rest.len());
+    let mut after_backslash = false;
+    for c in rest.chars() {
+        if c == '\\' {
+            if !after_backslash {
+                out.push(c);
+            }
+            after_backslash = true;
+        } else {
+            out.push(c);
+            after_backslash = false;
+        }
+    }
+    format!("{prefix}{out}")
 }
 
 /* ------------------------------ dichiarazioni ----------------------------- */
@@ -149,7 +184,13 @@ pub fn available() -> bool {
 pub fn roots_block() -> String {
     let list: Vec<String> = guard::roots().iter().map(|r| format!("- {}", display_path(r))).collect();
     format!(
-        "STRUMENTI SUI FILE\nHai accesso in sola lettura a queste cartelle e a tutto quello che contengono:\n{}\n\nQuando la domanda riguarda file, cartelle o documenti dell'utente, guarda davvero con gli strumenti invece di dire che non puoi. Parti da list_dir su una di queste cartelle. Non inventare percorsi: quelli fuori da questo elenco vengono rifiutati. Non puoi scrivere, spostare o cancellare niente: se te lo chiedono, dillo.",
+        "STRUMENTI SUI FILE\nHai accesso in sola lettura a queste cartelle e a tutto quello che contengono:\n{}\n\nQuando la domanda riguarda file, cartelle o documenti dell'utente, guarda davvero con gli strumenti invece di dire che non puoi.
+
+Non inventare percorsi: un percorso indovinato non esiste e ti fa perdere un giro. Se l'utente nomina un file senza dire dove sta, cercalo con find_files; se nomina una cartella, aprila con list_dir. Solo quando hai il percorso vero, letto da uno di quei due, usa read_file.
+
+Nei percorsi scrivi una barra rovesciata sola: C:\\cartella\\file.txt, non C:\\\\cartella\\\\file.txt.
+
+Non puoi scrivere, spostare o cancellare niente: se te lo chiedono, dillo.",
         list.join("\n")
     )
 }
@@ -160,8 +201,8 @@ pub fn roots_block() -> String {
 /// qualche secondo per ogni passo: senza, sembra fermo.
 pub fn status_line(call: &ToolCall) -> String {
     match call.name.as_str() {
-        "list_dir" => format!("Guardo in {}", call.arg("path").unwrap_or_default()),
-        "read_file" => format!("Leggo {}", call.arg("path").unwrap_or_default()),
+        "list_dir" => format!("Guardo in {}", call.path_arg("path").unwrap_or_default()),
+        "read_file" => format!("Leggo {}", call.path_arg("path").unwrap_or_default()),
         "find_files" => format!("Cerco file: {}", call.arg("name").unwrap_or_default()),
         "search_in_files" => format!("Cerco nei file: {}", call.arg("text").unwrap_or_default()),
         other => format!("Uso {other}"),
@@ -175,20 +216,20 @@ pub fn status_line(call: &ToolCall) -> String {
 /// dopo, mentre un errore duro interromperebbe la risposta.
 pub fn run(call: &ToolCall) -> String {
     match call.name.as_str() {
-        "list_dir" => match call.arg("path") {
+        "list_dir" => match call.path_arg("path") {
             Some(path) => list_dir(&path),
             None => "Errore: manca il parametro 'path'.".to_string(),
         },
-        "read_file" => match call.arg("path") {
+        "read_file" => match call.path_arg("path") {
             Some(path) => read_file(&path),
             None => "Errore: manca il parametro 'path'.".to_string(),
         },
         "find_files" => match call.arg("name") {
-            Some(name) => find_files(&name, call.arg("path")),
+            Some(name) => find_files(&name, call.path_arg("path")),
             None => "Errore: manca il parametro 'name'.".to_string(),
         },
         "search_in_files" => match call.arg("text") {
-            Some(text) => search_in_files(&text, call.arg("path")),
+            Some(text) => search_in_files(&text, call.path_arg("path")),
             None => "Errore: manca il parametro 'text'.".to_string(),
         },
         other => format!("Errore: lo strumento '{other}' non esiste."),
@@ -200,6 +241,9 @@ fn list_dir(path: &str) -> String {
         Ok(d) => d,
         Err(e) => return format!("Errore: {e}"),
     };
+    if !dir.exists() {
+        return missing(&dir);
+    }
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) => return format!("Errore: cartella non leggibile ({e})."),
@@ -247,6 +291,9 @@ fn read_file(path: &str) -> String {
         Ok(f) => f,
         Err(e) => return format!("Errore: {e}"),
     };
+    if !file.exists() {
+        return missing(&file);
+    }
     if file.is_dir() {
         return format!("Errore: {} e' una cartella. Usa list_dir.", display_path(&file));
     }
@@ -367,6 +414,21 @@ fn search_in_files(needle: &str, path: Option<String>) -> String {
     out
 }
 
+/// Un percorso che non esiste e' quasi sempre un percorso indovinato. Dirlo
+/// cosi' — invece di lasciar passare il "file non trovato" del sistema, che un
+/// modello legge come "non hai i permessi" — gli fa fare il passo giusto
+/// invece di rispondere che non ci riesce.
+fn missing(path: &Path) -> String {
+    let parent = path
+        .parent()
+        .map(|p| format!(" Elenca prima {} con list_dir,", display_path(p)))
+        .unwrap_or_default();
+    format!(
+        "Errore: {} non esiste. Non hai i permessi: hai indovinato il percorso.{parent} oppure cerca il file per nome con find_files.",
+        display_path(path)
+    )
+}
+
 /* -------------------------------- utilita' -------------------------------- */
 
 /// Da dove parte una ricerca: la cartella chiesta, verificata, oppure tutte le
@@ -479,7 +541,7 @@ pub struct ToolUse {
 impl ToolUse {
     pub fn of(call: &ToolCall) -> Self {
         let detail = call
-            .arg("path")
+            .path_arg("path")
             .or_else(|| call.arg("name"))
             .or_else(|| call.arg("text"))
             .unwrap_or_default();
@@ -519,6 +581,40 @@ mod tests {
             input: serde_json::json!({}),
         };
         assert!(run(&call).contains("path"));
+    }
+
+    /// Un modello locale su Windows raddoppia le barre: se non si stringono,
+    /// ogni `read_file` finisce su un percorso che non esiste.
+    #[test]
+    fn doubled_backslashes_are_squeezed_back() {
+        assert_eq!(tidy_path(r"C:\\Users\\franc\\note.txt"), r"C:\Users\franc\note.txt");
+        assert_eq!(tidy_path(r"C:\Users\franc\note.txt"), r"C:\Users\franc\note.txt");
+        // Un percorso di rete comincia davvero con due barre: quelle restano.
+        assert_eq!(tidy_path(r"\\server\condivisa\a.txt"), r"\\server\condivisa\a.txt");
+        // Virgolette e spazi che il modello si porta dietro.
+        assert_eq!(tidy_path("  \"/dati/a.txt\"  "), "/dati/a.txt");
+    }
+
+    #[test]
+    fn a_guessed_path_is_told_apart_from_a_denied_one() {
+        let call = ToolCall {
+            id: String::new(),
+            name: "read_file".to_string(),
+            input: serde_json::json!({ "path": r"C:\\Users\\franc\\note.txt" }),
+        };
+        // Fuori dal recinto o inesistente, il percorso qui non c'e': quello che
+        // conta e' che il messaggio non dica "permessi", che il modello legge
+        // come "arrenditi".
+        let answer = run(&call);
+        assert!(!answer.to_lowercase().contains("permess") || answer.contains("hai indovinato"));
+    }
+
+    #[test]
+    fn missing_says_what_to_do_next() {
+        let text = missing(Path::new(r"C:\dati\inventato.txt"));
+        assert!(text.contains("non esiste"));
+        assert!(text.contains("list_dir"));
+        assert!(text.contains("find_files"));
     }
 
     #[test]

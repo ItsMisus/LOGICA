@@ -296,6 +296,19 @@ l'interruttore: da quel momento il modello ha quattro strumenti, tutti in **sola
 | `find_files` | cerca per pezzo di nome, nelle sottocartelle | 40 risultati, 6 livelli, 4.000 file visitati |
 | `search_in_files` | cerca un testo dentro i file, riga per riga | 40 righe, file oltre 2 MB e binari saltati |
 
+Serve un modello che sappia usare gli strumenti, e che sia abbastanza forte da concatenarli: nelle
+prove `qwen3:30b-a3b` fa il giro giusto (`find_files` per trovare il file, `read_file` per aprirlo,
+poi risponde), mentre `llama3.1:8b` si ferma dopo la prima chiamata e completa a memoria. Con Claude
+non è un problema.
+
+Due riparazioni che sembrano dettagli e non lo sono. I modelli locali su Windows **raddoppiano le
+barre rovesciate** (`C:\Users\...`), e senza stringerle ogni lettura finisce su un percorso che
+non esiste: dentro un percorso vero due barre di fila non compaiono mai, quindi si stringono sempre,
+tranne le due in testa dei percorsi di rete. E un percorso inesistente **non** viene riportato come
+"file non trovato": il messaggio dice che il percorso è stato indovinato e suggerisce `list_dir` o
+`find_files`, perché l'errore di sistema il modello lo legge come «non ho i permessi» e si arrende
+invece di cercare.
+
 Il recinto è lo stesso dell'accesso da browser (`server/guard.rs`): un percorso fuori dalle cartelle
 autorizzate viene rifiutato prima di toccare il disco, `..` compreso, e un link simbolico che punta
 fuori non funziona come scorciatoia. `node_modules`, `.git`, `target` e simili non vengono nemmeno
@@ -500,8 +513,9 @@ Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta
 npm run check                                # tipi + 25 test del frontend
 
 cd src-tauri
-cargo test                                   # 94 test offline
+cargo test                                   # 97 test offline
 cargo test -- --ignored live_ollama_stream   # streaming vero contro Ollama
+cargo test -- --ignored live_file_tools      # il modello cerca, apre e legge un file vero
 cargo test -- --ignored live_search          # ricerca vera (DuckDuckGo/Bing)
 cargo test -- --ignored live_research        # ricerca + lettura delle pagine
 cargo test -- --ignored live_web_flow        # giro completo: decide, cerca, risponde
