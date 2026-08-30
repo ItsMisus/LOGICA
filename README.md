@@ -102,15 +102,28 @@ Scorciatoie: **Invio** manda, **Shift+Invio** va a capo, **Ctrl+N** apre una con
 
 ### Allegati
 
-Il pulsante `+` del composer apre il dialogo di sistema; il contenuto lo legge il backend
-(`src-tauri/src/attachments.rs`), l'app non copia niente da nessuna parte.
+Tre strade: il pulsante `+` apre il dialogo di sistema, un file **trascinato** nella finestra si
+attacca da solo, e un'immagine si **incolla** con Ctrl+V. Nei primi due casi il contenuto lo legge
+il backend per percorso (`src-tauri/src/attachments.rs`), e l'app non copia niente da nessuna parte.
 
 | Tipo | Cosa arriva al modello | Limite |
 |---|---|---|
 | Testo (`.txt`, `.md`, `.csv`, sorgenti, …) | il testo, tagliato a 12.000 caratteri | 2 MB |
 | PDF | il testo estratto | 20 MB |
 | DOCX | il testo dei paragrafi | 20 MB |
+| XLSX | le celle come TSV, foglio per foglio | 20 MB |
 | Immagini (`png`, `jpeg`, `gif`, `webp`) | il file in base64 | 3 MB |
+
+Il TSV per i fogli di calcolo non è un ripiego: è il formato in cui un modello riconosce una tabella
+senza che gliela si spieghi, e costa molti meno caratteri di un Markdown allineato. Di ogni foglio
+si leggono 2.000 righe e 60 colonne; le righe tutte vuote non compaiono. Un `.xlsx` è uno zip come
+il `.docx`, con due differenze: il testo delle celle non sta nel foglio ma in una tabella condivisa
+a cui le celle rimandano per indice, e i fogli sono più di uno.
+
+Il trascinamento non è quello del browser: la webview di Tauri lo intercetta e passa i **percorsi
+veri**, che è esattamente quello che serve. Da browser quei percorsi non esisterebbero, quindi lì
+non si aggancia. L'immagine incollata invece non ha un percorso: viaggia già letta, in base64, ed è
+l'unico allegato che funziona **anche da browser**.
 
 Dettagli che si notano solo quando mancano: un file non UTF-8 viene riprovato in **Windows-1252**
 prima di dichiararlo illeggibile; un PDF fatto di scansioni lo dice invece di tornare vuoto; un PDF
@@ -308,10 +321,12 @@ Una chat salvata:
   "title": "Regex in Rust",
   "created": "2026-08-29T14:25:30Z",
   "updated": "2026-08-29T14:31:02Z",
+  "engine": "ollama:qwen2.5:14b",
   "messages": [
     { "id": "m1", "role": "user", "content": "come si scrive…", "timestamp": "…", "type": "text" },
     { "id": "m2", "role": "ai", "content": "…", "timestamp": "…", "type": "text",
-      "sources": [{ "title": "…", "url": "https://…", "snippet": "…" }] }
+      "sources": [{ "title": "…", "url": "https://…", "snippet": "…" }],
+      "tools": [{ "name": "read_file", "detail": "C:\\dati\\note.md" }] }
   ]
 }
 ```
@@ -350,8 +365,10 @@ Argon2id in `~/.logica/server.json`.
 - **Spostare il motore AI**: `set_preferences` rifiuta ogni modifica a `ollama_url`, e `ollama_url`
   nel corpo delle richieste viene comunque ignorato a favore di quello salvato sul PC. Senza questo,
   una sessione valida basterebbe a far spedire altrove conversazioni e nomi dei file.
-- **Allegare file**: gli allegati si leggono per percorso dal dialogo di sistema, che nel browser
-  non esiste; il pulsante non compare.
+- **Allegare file dal disco**: si leggono per percorso dal dialogo di sistema, che nel browser non
+  esiste; il pulsante non compare, e il trascinamento non passa percorsi. Un'immagine **incollata**
+  invece funziona, perché porta con sé il proprio contenuto.
+- **Accendere la ricerca nei documenti** o costruirne l'indice.
 
 ### Prima connessione
 
@@ -410,6 +427,7 @@ file-organizer-ai/
 | `stop_talk` | — | — |
 | `suggest_title` | `question`, `answer`, `config` | `string \| null` |
 | `read_attachments` | `paths` | `Attachment[]` |
+| `attach_image` | `name`, `mediaType`, `data` (base64) | `Attachment` |
 | `save_chat` / `load_chat` / `list_chats` / `delete_chat` | `chat` / `chatId` | `—` / `StoredChat` / `ChatMetadata[]` / `—` |
 | `search_chats` | `query` | `ChatMatch[]` |
 | `rename_chat` | `chatId`, `title` | `ChatMetadata` |
@@ -430,7 +448,7 @@ Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta
 
 ```bash
 cd src-tauri
-cargo test                                   # 88 test offline
+cargo test                                   # 92 test offline
 cargo test -- --ignored live_ollama_stream   # streaming vero contro Ollama
 cargo test -- --ignored live_search          # ricerca vera (DuckDuckGo/Bing)
 cargo test -- --ignored live_research        # ricerca + lettura delle pagine

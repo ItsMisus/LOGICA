@@ -19,7 +19,14 @@ interface Props {
 /** Coda del tooltip di un allegato: da dove viene il testo che ha letto il
  *  modello, e se e' stato tagliato. */
 function label(file: Attachment): string {
-  const kind = file.kind === "pdf" ? " - testo estratto dal PDF" : file.kind === "docx" ? " - testo estratto dal documento" : "";
+  const kind =
+    file.kind === "pdf"
+      ? " - testo estratto dal PDF"
+      : file.kind === "docx"
+        ? " - testo estratto dal documento"
+        : file.kind === "xlsx"
+          ? " - celle del foglio di calcolo"
+          : "";
   return file.truncated ? `${kind} (troncato)` : kind;
 }
 
@@ -86,22 +93,24 @@ export default function Message({
         <div className="user-bubble">
           {images.length > 0 && (
             <div className="bubble-images">
-              {images.map((file) => (
+              {/* Un'immagine incollata non ha percorso: la chiave la da'
+                  la posizione, o due incollate si sovrapporrebbero. */}
+              {images.map((file, i) => (
                 <img
-                  key={file.path}
+                  key={file.path || `incollata-${i}`}
                   className="bubble-image"
                   src={`data:${file.image?.media_type};base64,${file.image?.data}`}
                   alt={file.name}
-                  title={file.path}
+                  title={file.path || file.name}
                 />
               ))}
             </div>
           )}
           {others.length > 0 && (
             <div className="bubble-files">
-              {others.map((file) => (
+              {others.map((file, i) => (
                 <span
-                  key={file.path}
+                  key={file.path || `allegato-${i}`}
                   className={`file-chip ${file.error ? "failed" : ""}`}
                   title={file.error ? `${file.path} - ${file.error}` : `${file.path}${label(file)}`}
                 >

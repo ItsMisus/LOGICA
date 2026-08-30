@@ -38,6 +38,7 @@ pub enum Kind {
     Text,
     Pdf,
     Docx,
+    Xlsx,
     Image,
 }
 
@@ -111,6 +112,39 @@ pub fn read_all(paths: &[String]) -> Vec<Attachment> {
     paths.iter().map(|p| read_one(p)).collect()
 }
 
+/// Un'immagine che arriva dagli appunti invece che dal disco.
+///
+/// Non ha un percorso, e non ne inventiamo uno: `path` resta vuoto. Il resto
+/// del giro (il messaggio, il salvataggio, l'invio al modello) tratta gli
+/// allegati per contenuto, non per percorso, quindi non se ne accorge.
+pub fn from_image_data(name: &str, media_type: &str, data: &str) -> Result<Attachment, String> {
+    if !matches!(media_type, "image/png" | "image/jpeg" | "image/gif" | "image/webp") {
+        return Err(format!("Formato immagine non supportato: {media_type}"));
+    }
+    // Il base64 non si riscrive: si controlla che sia valido e quanto pesa
+    // davvero una volta decodificato, che e' il numero che conta per il limite.
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| "Immagine incollata illeggibile.".to_string())?;
+    let size = bytes.len() as u64;
+    if size > MAX_IMAGE_BYTES {
+        let mb = MAX_IMAGE_BYTES / (1024 * 1024);
+        return Err(format!("Immagine troppo grande (oltre {mb} MB)."));
+    }
+
+    let name = if name.trim().is_empty() { "immagine incollata" } else { name.trim() };
+    Ok(Attachment {
+        name: name.to_string(),
+        path: String::new(),
+        size,
+        kind: Kind::Image,
+        text: None,
+        image: Some(Image { media_type: media_type.to_string(), data: data.to_string() }),
+        truncated: false,
+        error: None,
+    })
+}
+
 /// Estensione in minuscolo, vuota se non c'e'.
 fn extension(path: &Path) -> String {
     path.extension()
@@ -125,6 +159,7 @@ fn kind_of(path: &Path) -> Kind {
     match extension(path).as_str() {
         "pdf" => Kind::Pdf,
         "docx" => Kind::Docx,
+        "xlsx" => Kind::Xlsx,
         "png" | "jpg" | "jpeg" | "gif" | "webp" => Kind::Image,
         _ => Kind::Text,
     }
@@ -145,7 +180,7 @@ fn media_type(path: &Path) -> Option<&'static str> {
 fn max_bytes(kind: Kind) -> u64 {
     match kind {
         Kind::Text => MAX_TEXT_BYTES,
-        Kind::Pdf | Kind::Docx => MAX_DOC_BYTES,
+        Kind::Pdf | Kind::Docx | Kind::Xlsx => MAX_DOC_BYTES,
         Kind::Image => MAX_IMAGE_BYTES,
     }
 }
@@ -201,6 +236,10 @@ fn read_one(path: &str) -> Attachment {
             Err(e) => Attachment::failed(path, name, size, kind, e),
         },
         Kind::Docx => match docx_text(&bytes) {
+            Ok(text) => Attachment::with_text(path, name, size, kind, text),
+            Err(e) => Attachment::failed(path, name, size, kind, e),
+        },
+        Kind::Xlsx => match xlsx_text(&bytes) {
             Ok(text) => Attachment::with_text(path, name, size, kind, text),
             Err(e) => Attachment::failed(path, name, size, kind, e),
         },
@@ -307,6 +346,178 @@ fn strip_word_xml(xml: &str) -> String {
     out.push_str(rest);
 
     unescape_xml(&out)
+}
+
+/* ---------------------------------- XLSX ---------------------------------- */
+
+/// Righe lette da un foglio. Un modello non ragiona su diecimila righe di
+/// tabella, e il testo viene comunque tagliato dopo: meglio fermarsi qui e
+/// dirlo, che riempire il contesto con la meta' di un foglio.
+const MAX_SHEET_ROWS: usize = 2_000;
+
+/// Celle lette da una riga.
+const MAX_ROW_CELLS: usize = 60;
+
+/// Un `.xlsx` e' uno zip come il `.docx`, con due differenze che contano: il
+/// testo delle celle non sta nel foglio ma in una tabella condivisa
+/// (`sharedStrings.xml`, a cui le celle rimandano per indice), e i fogli sono
+/// piu' di uno.
+///
+/// Esce come TSV: una riga per riga, celle separate da tabulatore. E' il
+/// formato in cui un modello riconosce una tabella senza che gliela si debba
+/// spiegare, e costa molti meno caratteri di un Markdown allineato.
+fn xlsx_text(bytes: &[u8]) -> Result<String, String> {
+    if !bytes.starts_with(b"PK") {
+        return Err("non sembra un XLSX".to_string());
+    }
+    let cursor = std::io::Cursor::new(bytes);
+    let mut zip = zip::ZipArchive::new(cursor).map_err(|e| format!("XLSX illeggibile: {e}"))?;
+
+    let shared = read_zip_entry(&mut zip, "xl/sharedStrings.xml")
+        .map(|xml| shared_strings(&xml))
+        .unwrap_or_default();
+
+    // I fogli si leggono in ordine di nome, che nei file scritti da Excel e'
+    // anche l'ordine delle schede.
+    let mut sheets: Vec<String> = zip
+        .file_names()
+        .filter(|n| n.starts_with("xl/worksheets/") && n.ends_with(".xml"))
+        .map(|n| n.to_string())
+        .collect();
+    if sheets.is_empty() {
+        return Err("XLSX senza fogli dentro: forse e' un .xls rinominato".to_string());
+    }
+    sheets.sort();
+
+    let mut out = String::new();
+    for sheet in &sheets {
+        let Some(xml) = read_zip_entry(&mut zip, sheet) else { continue };
+        let rows = sheet_rows(&xml, &shared);
+        if rows.trim().is_empty() {
+            continue;
+        }
+        if sheets.len() > 1 {
+            let name = sheet.rsplit('/').next().unwrap_or(sheet).trim_end_matches(".xml");
+            out.push_str(&format!("--- foglio {name} ---\n"));
+        }
+        out.push_str(&rows);
+        out.push('\n');
+    }
+
+    let text = squeeze_blank_lines(&out);
+    if text.trim().is_empty() {
+        return Err("il foglio di calcolo non contiene testo".to_string());
+    }
+    Ok(text)
+}
+
+fn read_zip_entry<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    name: &str,
+) -> Option<String> {
+    let mut xml = String::new();
+    zip.by_name(name).ok()?.read_to_string(&mut xml).ok()?;
+    Some(xml)
+}
+
+/// La tabella condivisa: un elemento `<si>` per stringa, con dentro uno o piu'
+/// `<t>` (Excel spezza in piu' pezzi una cella con formattazione mista).
+fn shared_strings(xml: &str) -> Vec<String> {
+    blocks(xml, "<si", "</si>").map(|inner| texts_in(inner)).collect()
+}
+
+/// Le righe di un foglio, come TSV.
+fn sheet_rows(xml: &str, shared: &[String]) -> String {
+    let mut out = String::new();
+    let mut rows = 0usize;
+
+    for row in blocks(xml, "<row", "</row>") {
+        if rows >= MAX_SHEET_ROWS {
+            out.push_str("[...] foglio tagliato: altre righe non lette\n");
+            break;
+        }
+        let cells: Vec<String> = blocks(row, "<c", "</c>")
+            .take(MAX_ROW_CELLS)
+            .map(|cell| cell_value(cell, shared))
+            .collect();
+        // Una riga di sole celle vuote non aggiunge niente.
+        if cells.iter().any(|c| !c.is_empty()) {
+            out.push_str(&cells.join("\t"));
+            out.push('\n');
+            rows += 1;
+        }
+    }
+    out
+}
+
+/// Il contenuto di una cella. `t="s"` vuol dire che dentro `<v>` non c'e' il
+/// testo ma il numero di riga della tabella condivisa; `t="inlineStr"` che il
+/// testo sta li' dentro; tutto il resto e' un numero o una data gia' scritta.
+fn cell_value(cell: &str, shared: &[String]) -> String {
+    let head = cell.split('>').next().unwrap_or("");
+    let kind = attribute(head, "t").unwrap_or_default();
+
+    if kind == "inlineStr" {
+        return texts_in(cell);
+    }
+    let raw = blocks(cell, "<v", "</v>").next().map(inner_text).unwrap_or_default();
+    if kind == "s" {
+        return raw
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| shared.get(i))
+            .cloned()
+            .unwrap_or_default();
+    }
+    raw
+}
+
+/// Il valore di un attributo dentro il tag di apertura.
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let start = tag.find(&needle)? + needle.len();
+    let rest = &tag[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// I blocchi `<tag ...>...</tag>`, ognuno dall'inizio del tag di apertura alla
+/// fine del contenuto. Un elemento vuoto (`<c r="A1"/>`) non ha chiusura: si
+/// salta, e infatti non contiene niente.
+fn blocks<'a>(xml: &'a str, open: &'a str, close: &'a str) -> impl Iterator<Item = &'a str> {
+    let mut rest = xml;
+    std::iter::from_fn(move || loop {
+        let start = rest.find(open)?;
+        let after = &rest[start..];
+        let Some(end) = after.find(close) else {
+            rest = "";
+            return None;
+        };
+        // `<row` non deve agganciare `<rowBreaks`: dopo il nome del tag ci
+        // vuole uno spazio, una chiusura o una barra.
+        let next = after[open.len()..].chars().next();
+        let is_tag = matches!(next, Some(' ') | Some('>') | Some('/'));
+        rest = &after[end + close.len()..];
+        if is_tag {
+            return Some(&after[..end]);
+        }
+    })
+}
+
+/// Il testo dentro un frammento, tolti tutti i tag.
+fn inner_text(fragment: &str) -> String {
+    let body = match fragment.find('>') {
+        Some(i) => &fragment[i + 1..],
+        None => return String::new(),
+    };
+    unescape_xml(body)
+}
+
+/// Il testo di tutti i `<t>` dentro un frammento, attaccati: e' cosi' che una
+/// cella con formattazione mista torna una stringa sola.
+fn texts_in(fragment: &str) -> String {
+    blocks(fragment, "<t", "</t>").map(inner_text).collect::<Vec<_>>().join("")
 }
 
 /// Le cinque entita' XML predefinite: sono le uniche che Word scrive nel
@@ -459,6 +670,71 @@ mod tests {
         assert_eq!(letti[0].text.as_deref(), Some("Primo paragrafo\nSecondo & ultimo"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Un `.xlsx` minimo: le stringhe stanno in una tabella a parte e le celle
+    /// ci rimandano per indice, che e' la differenza che conta rispetto al
+    /// `.docx`.
+    #[test]
+    fn reads_the_cells_of_an_xlsx() {
+        let dir = temp_dir("xlsx");
+        let file = dir.join("conti.xlsx");
+
+        let shared = "<sst><si><t>Voce</t></si><si><t>Importo</t></si>\
+                      <si><t>Affitto &amp; spese</t></si></sst>";
+        let sheet = "<worksheet><sheetData>\
+            <row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c><c r=\"B1\" t=\"s\"><v>1</v></c></row>\
+            <row r=\"2\"><c r=\"A2\" t=\"s\"><v>2</v></c><c r=\"B2\"><v>750</v></c></row>\
+            <row r=\"3\"/>\
+            </sheetData></worksheet>";
+
+        let buffer = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(buffer);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file::<_, ()>("xl/sharedStrings.xml", options).expect("voce zip");
+        zip.write_all(shared.as_bytes()).expect("scrittura");
+        zip.start_file::<_, ()>("xl/worksheets/sheet1.xml", options).expect("voce zip");
+        zip.write_all(sheet.as_bytes()).expect("scrittura");
+        let finished = zip.finish().expect("chiusura zip").into_inner();
+        fs::write(&file, finished).expect("scrittura xlsx");
+
+        let letti = read_all(&[file.to_string_lossy().to_string()]);
+        assert_eq!(letti[0].kind, Kind::Xlsx);
+        assert_eq!(letti[0].error, None);
+        // TSV: e' il formato in cui un modello riconosce una tabella senza
+        // spiegazioni. La riga vuota non compare.
+        assert_eq!(letti[0].text.as_deref(), Some("Voce\tImporto\nAffitto & spese\t750"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fake_xlsx_is_refused() {
+        let dir = temp_dir("finto_xlsx");
+        let file = dir.join("finto.xlsx");
+        fs::write(&file, "non sono uno zip").expect("scrittura");
+
+        let letti = read_all(&[file.to_string_lossy().to_string()]);
+        assert!(letti[0].error.as_deref().unwrap().contains("non sembra un XLSX"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pasted_image_needs_no_path() {
+        // Un PNG di un pixel: quello che conta qui e' che il base64 sia valido.
+        let png = base64::engine::general_purpose::STANDARD.encode([0x89, 0x50, 0x4E, 0x47]);
+        let attached = from_image_data("", "image/png", &png).expect("immagine accettata");
+        assert_eq!(attached.path, "");
+        assert_eq!(attached.name, "immagine incollata");
+        assert_eq!(attached.kind, Kind::Image);
+        assert_eq!(attached.image.expect("immagine").media_type, "image/png");
+    }
+
+    #[test]
+    fn a_pasted_image_of_the_wrong_kind_is_refused() {
+        assert!(from_image_data("x.bmp", "image/bmp", "AAAA").is_err());
+        assert!(from_image_data("x.png", "image/png", "non base64!!").is_err());
     }
 
     /// Estensione giusta, contenuto no: si dice cosa non torna invece di

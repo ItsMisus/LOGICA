@@ -14,11 +14,12 @@ export interface AttachmentImage {
 }
 
 /** Che cosa il backend e' riuscito a leggere dentro l'allegato. */
-export type AttachmentKind = "text" | "pdf" | "docx" | "image";
+export type AttachmentKind = "text" | "pdf" | "docx" | "xlsx" | "image";
 
 /** File allegato a un messaggio: il contenuto lo estrae il backend. */
 export interface Attachment {
   name: string;
+  /** Vuoto per un'immagine incollata: quella non viene da un file. */
   path: string;
   size: number;
   kind: AttachmentKind;

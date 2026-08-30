@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
-import { isDesktop } from "../api";
-import type { ChatEngine } from "../types";
+import { call, isDesktop } from "../api";
+import type { Attachment, ChatEngine } from "../types";
 
 interface Props {
   /** Vero mentre la risposta e' in arrivo: il pulsante diventa "interrompi". */
@@ -24,7 +24,7 @@ interface Props {
   /** Motore raggiungibile: colora il quadratino di stato accanto al modello. */
   online: boolean;
   autoFocus?: boolean;
-  onSend: (text: string, attachmentPaths: string[]) => void;
+  onSend: (text: string, attachmentPaths: string[], pasted: Attachment[]) => void;
   onStop: () => void;
   /** Il dialogo di sistema non si e' aperto: lo segnala la pagina. */
   onError: (message: string) => void;
@@ -39,11 +39,24 @@ const MAX_HEIGHT = 220;
  * stesso, e vietarlo qui vorrebbe dire indovinare al posto dell'utente.
  */
 const FILTERS = [
-  { name: "Allegati leggibili", extensions: ["txt", "md", "csv", "json", "xml", "yml", "yaml", "log", "pdf", "docx", "png", "jpg", "jpeg", "gif", "webp"] },
+  { name: "Allegati leggibili", extensions: ["txt", "md", "csv", "json", "xml", "yml", "yaml", "log", "pdf", "docx", "xlsx", "png", "jpg", "jpeg", "gif", "webp"] },
   { name: "Immagini", extensions: ["png", "jpg", "jpeg", "gif", "webp"] },
-  { name: "Documenti", extensions: ["pdf", "docx"] },
+  { name: "Documenti", extensions: ["pdf", "docx", "xlsx"] },
   { name: "Tutti i file", extensions: ["*"] },
 ];
+
+/** Il contenuto di un file in base64, senza il prefisso `data:`. */
+function base64Of(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Immagine non letta dagli appunti."));
+    reader.onload = () => {
+      const result = String(reader.result);
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 /** Nome del file dal percorso, senza dipendere dal separatore di sistema. */
 function baseName(path: string): string {
@@ -68,8 +81,13 @@ export default function Composer({
   onError,
 }: Props) {
   const [draft, setDraft] = useState("");
-  // Percorsi scelti nel dialogo: il contenuto lo legge il backend all'invio.
+  // Percorsi scelti nel dialogo o trascinati: il contenuto lo legge il backend
+  // all'invio.
   const [files, setFiles] = useState<string[]>([]);
+  // Immagini incollate: non hanno un percorso, quindi sono gia' state lette al
+  // momento dell'incolla e viaggiano gia' pronte.
+  const [pasted, setPasted] = useState<Attachment[]>([]);
+  const [dragging, setDragging] = useState(false);
   const field = useRef<HTMLTextAreaElement | null>(null);
 
   // Il campo cresce con il testo, come in una chat vera.
@@ -97,20 +115,77 @@ export default function Composer({
     }
   }
 
-  function send() {
-    const text = draft.trim();
-    if ((!text && files.length === 0) || streaming || disabled) return;
-    setDraft("");
-    setFiles([]);
-    onSend(text, files);
+  /**
+   * Trascinare un file nella finestra. Non e' il drag-and-drop del browser: la
+   * webview di Tauri lo intercetta e passa i percorsi veri, che e' quello che
+   * serve, perche' gli allegati li legge il backend per percorso. Da browser
+   * quei percorsi non esisterebbero, quindi li' non si aggancia niente.
+   */
+  useEffect(() => {
+    if (!isDesktop) return;
+    let stop: (() => void) | undefined;
+    void (async () => {
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      stop = await getCurrentWebview().onDragDropEvent((event) => {
+        if (event.payload.type === "over") {
+          setDragging(true);
+          return;
+        }
+        setDragging(false);
+        if (event.payload.type !== "drop") return;
+        const paths = event.payload.paths;
+        setFiles((prev) => [...prev, ...paths.filter((p) => !prev.includes(p))]);
+        field.current?.focus();
+      });
+    })().catch(() => undefined);
+    return () => stop?.();
+  }, []);
+
+  /**
+   * Incollare uno screenshot. Un'immagine negli appunti non ha un percorso da
+   * dare al backend: si manda il contenuto, e torna un allegato gia' letto.
+   * E' l'unico allegato che funziona anche da browser.
+   */
+  async function pasteImages(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const images = Array.from(event.clipboardData.files).filter((f) =>
+      f.type.startsWith("image/"),
+    );
+    if (images.length === 0) return;
+    // C'e' un'immagine: il testo degli appunti, se c'e', non deve finire anche
+    // dentro il campo.
+    event.preventDefault();
+
+    for (const image of images) {
+      try {
+        const data = await base64Of(image);
+        const attached = await call<Attachment>("attach_image", {
+          name: image.name || "immagine incollata",
+          mediaType: image.type,
+          data,
+        });
+        setPasted((prev) => [...prev, attached]);
+      } catch (e) {
+        onError(String(e));
+      }
+    }
   }
 
-  const canSend = !disabled && (draft.trim().length > 0 || files.length > 0);
+  function send() {
+    const text = draft.trim();
+    if ((!text && files.length === 0 && pasted.length === 0) || streaming || disabled) return;
+    setDraft("");
+    setFiles([]);
+    setPasted([]);
+    onSend(text, files, pasted);
+  }
+
+  const canSend =
+    !disabled && (draft.trim().length > 0 || files.length > 0 || pasted.length > 0);
 
   return (
     <div className="composer">
-      <div className="composer-box">
-        {files.length > 0 && (
+      <div className={`composer-box ${dragging ? "dragging" : ""}`}>
+        {(files.length > 0 || pasted.length > 0) && (
           <div className="composer-files">
             {files.map((path) => (
               <span key={path} className="file-chip" title={path}>
@@ -119,6 +194,18 @@ export default function Composer({
                   className="file-chip-del"
                   aria-label={`Togli ${baseName(path)}`}
                   onClick={() => setFiles((prev) => prev.filter((p) => p !== path))}
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+            {pasted.map((image, i) => (
+              <span key={`incollata-${i}`} className="file-chip" title="immagine incollata">
+                {image.name}
+                <button
+                  className="file-chip-del"
+                  aria-label={`Togli ${image.name}`}
+                  onClick={() => setPasted((prev) => prev.filter((_, at) => at !== i))}
                 >
                   ✕
                 </button>
@@ -135,6 +222,7 @@ export default function Composer({
           placeholder={placeholder}
           aria-label="Messaggio"
           onChange={(e) => setDraft(e.target.value)}
+          onPaste={(e) => void pasteImages(e)}
           onKeyDown={(e) => {
             // Invio manda, Shift+Invio va a capo.
             if (e.key === "Enter" && !e.shiftKey) {

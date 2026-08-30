@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 
 import Composer from "./Composer";
 import Message from "./Message";
-import type { ChatEngine, ChatMessage } from "../types";
+import type { Attachment, ChatEngine, ChatMessage } from "../types";
 
 interface Props {
   messages: ChatMessage[];
@@ -23,7 +23,7 @@ interface Props {
   onPickEngine: (engine: ChatEngine) => void;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
-  onSend: (text: string, attachmentPaths: string[]) => void;
+  onSend: (text: string, attachmentPaths: string[], pasted: Attachment[]) => void;
   onStop: () => void;
   onRegenerate: () => void;
   /** Riscrive un messaggio dell'utente e riparte da li'. */
@@ -103,9 +103,9 @@ export default function ChatView({
       onPickEngine={onPickEngine}
       online={online}
       autoFocus
-      onSend={(text, paths) => {
+      onSend={(text, paths, pasted) => {
         follow.current = true;
-        onSend(text, paths);
+        onSend(text, paths, pasted);
       }}
       onStop={onStop}
       onError={onError}
@@ -131,7 +131,7 @@ export default function ChatView({
           <div className="hero-composer">{composer}</div>
           <div className="starters">
             {STARTERS.map((text, index) => (
-              <button key={text} className="starter" onClick={() => onSend(text, [])}>
+              <button key={text} className="starter" onClick={() => onSend(text, [], [])}>
                 <span className="starter-num" aria-hidden="true">
                   {(index + 1).toString().padStart(2, "0")}
                 </span>

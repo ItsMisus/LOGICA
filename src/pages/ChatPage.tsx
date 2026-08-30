@@ -330,14 +330,19 @@ export default function ChatPage() {
     [chatId, title, aiConfig, persist, toast],
   );
 
-  /** Manda un messaggio: i file scelti col "+" vengono letti prima di partire. */
+  /**
+   * Manda un messaggio. I file scelti col "+" o trascinati nella finestra
+   * vengono letti dal backend adesso; le immagini incollate sono gia' state
+   * lette quando sono state incollate, e arrivano gia' pronte.
+   */
   const send = useCallback(
-    (text: string, attachmentPaths: string[] = []) => {
+    (text: string, attachmentPaths: string[] = [], pasted: Attachment[] = []) => {
       void (async () => {
-        let attachments: Attachment[] = [];
+        let attachments: Attachment[] = [...pasted];
         if (attachmentPaths.length > 0) {
           try {
-            attachments = await call<Attachment[]>("read_attachments", { paths: attachmentPaths });
+            const read = await call<Attachment[]>("read_attachments", { paths: attachmentPaths });
+            attachments = [...read, ...pasted];
           } catch (e) {
             toast("error", `Allegati non letti: ${String(e)}`);
             return;
@@ -345,6 +350,8 @@ export default function ChatPage() {
           for (const failed of attachments.filter((a) => a.error !== null)) {
             toast("error", `${failed.name}: ${failed.error}`);
           }
+        }
+        if (attachments.length > 0) {
           const images = attachments.filter((a) => a.image).length;
           // Il modello che conta e' quello di questa chat, che puo' non essere
           // quello delle impostazioni.

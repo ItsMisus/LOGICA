@@ -1557,6 +1557,11 @@ button {
   color: var(--faint);
 }
 
+/* Un file trascinato sopra la finestra: il riquadro dice dove lasciarlo. */
+.composer-box.dragging {
+  border-color: var(--accent);
+}
+
 /* Due pulsanti in fila sotto una sezione delle impostazioni. */
 .row-actions {
   display: flex;

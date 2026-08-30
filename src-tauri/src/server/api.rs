@@ -350,6 +350,14 @@ struct PreferencesArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PastedImageArgs {
+    name: String,
+    media_type: String,
+    data: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FactArgs {
     fact_id: String,
 }
@@ -441,6 +449,14 @@ async fn command(
         },
         "export_chat" => match parse::<ExportArgs>(body) {
             Ok(a) => result(crate::export_chat(a.chat_id, a.format)),
+            Err(e) => e,
+        },
+
+        // Un'immagine incollata arriva col suo contenuto dentro la richiesta:
+        // e' l'unico allegato che funziona anche da browser, dove il dialogo
+        // di sistema non esiste e i percorsi del PC non si possono nominare.
+        "attach_image" => match parse::<PastedImageArgs>(body) {
+            Ok(a) => result(crate::attach_image(a.name, a.media_type, a.data)),
             Err(e) => e,
         },
 

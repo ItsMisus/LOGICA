@@ -236,6 +236,17 @@ fn read_attachments(paths: Vec<String>) -> Vec<attachments::Attachment> {
     attachments::read_all(&paths)
 }
 
+/// Un'immagine incollata negli appunti: non ha un percorso, quindi arriva
+/// gia' in base64 invece che per nome di file.
+#[tauri::command]
+fn attach_image(
+    name: String,
+    media_type: String,
+    data: String,
+) -> Result<attachments::Attachment, String> {
+    attachments::from_image_data(&name, &media_type, &data)
+}
+
 /// Titolo della conversazione, chiesto al modello dopo il primo scambio.
 /// Se non ne esce niente di sensato il frontend tiene quello che ha.
 #[tauri::command]
@@ -447,6 +458,7 @@ fn main() {
             talk,
             stop_talk,
             read_attachments,
+            attach_image,
             suggest_title,
             save_chat,
             load_chat,
