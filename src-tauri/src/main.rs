@@ -7,6 +7,7 @@ mod attachments;
 mod memory;
 mod server;
 mod storage;
+mod summary;
 mod tools;
 mod web;
 
@@ -114,6 +115,7 @@ async fn talk(
     let status_emitter = app.clone();
     let status_id = chat_id.clone();
     let reply = assistant::stream_reply(
+        &chat_id,
         &message,
         &history,
         &images,
@@ -220,7 +222,11 @@ fn list_chats() -> Result<Vec<ChatMetadata>, String> {
 
 #[tauri::command]
 fn delete_chat(chat_id: String) -> Result<(), String> {
-    storage::delete_chat(&chat_id)
+    storage::delete_chat(&chat_id)?;
+    // Il riassunto della parte vecchia non ha piu' una conversazione a cui
+    // appartenere.
+    summary::forget(&chat_id);
+    Ok(())
 }
 
 /// Cerca dentro le conversazioni salvate, contenuto compreso.
@@ -236,7 +242,15 @@ fn rename_chat(chat_id: String, title: String) -> Result<ChatMetadata, String> {
 
 #[tauri::command]
 fn duplicate_chat(chat_id: String) -> Result<ChatMetadata, String> {
-    storage::duplicate_chat(&chat_id)
+    let copy = storage::duplicate_chat(&chat_id)?;
+    // La copia ha gli stessi messaggi: le tocca anche lo stesso riassunto,
+    // altrimenti il primo turno nella copia lo rifarebbe da zero.
+    if let Some(digest) = summary::load(&chat_id) {
+        if let Err(e) = summary::save(&copy.id, &digest) {
+            eprintln!("[logica] riassunto non copiato: {e}");
+        }
+    }
+    Ok(copy)
 }
 
 /// Il testo della conversazione da salvare fuori dall'app: `markdown` per

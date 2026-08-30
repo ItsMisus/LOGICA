@@ -13,6 +13,7 @@ use futures_util::StreamExt;
 use crate::ai::{self, AiConfig, ChatTurn};
 use crate::attachments::Image;
 use crate::memory;
+use crate::summary::{self, Digest};
 use crate::tools::{self, ToolCall, ToolUse};
 use crate::web;
 
@@ -149,6 +150,23 @@ L'utente si chiama Franco
 L'utente lavora a un gestionale scritto in Rust
 L'utente vuole le risposte in italiano";
 
+/// Prompt del passo che condensa la parte vecchia di una conversazione lunga.
+///
+/// L'istruzione che conta e' l'ultima: un riassunto che perde i nomi, i numeri
+/// e i percorsi e' peggio del taglio secco che sostituisce, perche' sembra
+/// che l'assistente ricordi mentre ha dimenticato proprio le cose precise.
+const SUMMARIZER: &str = "Riassumi questa parte di conversazione perche' l'assistente possa continuarla senza aver piu' sotto gli occhi i messaggi originali.
+
+Regole:
+- Al massimo 10 righe, ognuna una frase secca. Niente titoli, niente preamboli, niente commenti sul riassunto stesso.
+- Tieni: cosa ha chiesto l'utente, cosa avete deciso, cosa e' rimasto in sospeso, e le sue preferenze emerse qui.
+- Copia esatti i dati concreti: nomi, numeri, percorsi di file, versioni, comandi, termini tecnici. Se un dato non lo puoi riportare preciso, non riportarlo affatto.
+- Non aggiungere niente che non sia scritto nella conversazione.";
+
+/// Caratteri tenuti di ogni turno quando si prepara il testo da riassumere.
+/// Il riassuntore deve vedere di cosa si parlava, non rileggere tutto.
+const MAX_TURN_IN_SUMMARY: usize = 400;
+
 /// Esito di un turno: il testo completo, piu' come e' finito.
 pub struct Reply {
     pub text: String,
@@ -224,13 +242,17 @@ fn system_prompt(cfg: &AiConfig, web_block: Option<&str>, file_tools: bool) -> S
     prompt
 }
 
+/// I messaggi da mandare al modello: i turni da `start` in poi, piu' quello
+/// appena scritto. Quello che viene prima di `start` non e' perduto, sta nel
+/// riassunto dentro il prompt di sistema.
 fn history_messages(
     history: &[ChatTurn],
+    start: usize,
     message: &str,
     images: &[Image],
     premium: bool,
 ) -> Vec<serde_json::Value> {
-    let start = history.len().saturating_sub(MAX_HISTORY_TURNS);
+    let start = start.min(history.len());
     let mut out: Vec<serde_json::Value> = history[start..]
         .iter()
         // I messaggi vuoti (una risposta interrotta subito) fanno rifiutare la
@@ -853,6 +875,7 @@ async fn gather_web(
 /// `on_status` racconta cosa sta facendo l'app prima di iniziare a scrivere
 /// (ricerca, pagine aperte): quei secondi sono di silenzio.
 pub async fn stream_reply(
+    chat_id: &str,
     message: &str,
     history: &[ChatTurn],
     images: &[Image],
@@ -877,8 +900,13 @@ pub async fn stream_reply(
     // una cartella autorizzata: dichiararli a vuoto fa perdere al modello sei
     // giri contro lo stesso rifiuto.
     let file_tools = cfg.file_tools && tools::available();
-    let system = system_prompt(cfg, block.as_deref(), file_tools);
-    let mut messages = history_messages(history, message, images, cfg.use_premium_ai);
+    let (older, start) = condense(chat_id, history, cfg, &mut on_status).await;
+
+    let mut system = system_prompt(cfg, block.as_deref(), file_tools);
+    if let Some(older) = older {
+        system.push_str(&format!("\n\n{older}"));
+    }
+    let mut messages = history_messages(history, start, message, images, cfg.use_premium_ai);
 
     // Testo gia' mandato al frontend nei passi precedenti: e' partito con gli
     // eventi `assistant-delta`, quindi deve ritrovarsi anche nella risposta
@@ -1034,6 +1062,88 @@ pub async fn suggest_title(question: &str, answer: &str, cfg: &AiConfig) -> Opti
     }
 }
 
+/* -------------------------------- riassunto ------------------------------- */
+
+/// Prepara il contesto di una conversazione lunga: il riassunto della parte
+/// vecchia, e da che turno in poi i messaggi vanno al modello per intero.
+///
+/// Torna `(None, start)` per le chat corte e per quelle in cui il riassunto
+/// non si e' potuto fare: in quel caso vale il taglio secco di prima, che e'
+/// peggio ma non blocca la risposta.
+async fn condense(
+    chat_id: &str,
+    history: &[ChatTurn],
+    cfg: &AiConfig,
+    on_status: &mut impl FnMut(&str),
+) -> (Option<String>, usize) {
+    let total = history.len();
+    let fallback = total.saturating_sub(MAX_HISTORY_TURNS);
+    if total <= MAX_HISTORY_TURNS {
+        return (None, 0);
+    }
+
+    // Un riassunto che copre piu' turni di quanti ce ne siano parla di
+    // messaggi che non esistono piu': l'utente ne ha modificato uno e la
+    // conversazione e' ripartita da li'. Si ricomincia da capo.
+    let existing = summary::load(chat_id).filter(|d| d.covered <= total);
+    let covered = existing.as_ref().map(|d| d.covered).unwrap_or(0);
+
+    let mut digest = existing;
+    if summary::needs_refresh(total, covered, MAX_HISTORY_TURNS) {
+        let target = summary::target(total, MAX_HISTORY_TURNS);
+        on_status("Riassumo la parte piu' vecchia della conversazione");
+        let previous = digest.as_ref().map(|d| d.text.as_str());
+        if let Some(text) = summarize(previous, &history[covered..target], cfg).await {
+            let fresh = Digest { covered: target, text };
+            // Se il salvataggio fallisce si rifara' il riassunto al turno dopo:
+            // costa una chiamata, non una risposta sbagliata.
+            if let Err(e) = summary::save(chat_id, &fresh) {
+                eprintln!("[logica] riassunto non salvato: {e}");
+            }
+            digest = Some(fresh);
+        }
+    }
+
+    match digest {
+        Some(d) => (Some(summary::prompt_block(&d.text)), d.covered),
+        None => (None, fallback),
+    }
+}
+
+/// Condensa dei turni, tenendo conto del riassunto gia' fatto delle parti
+/// ancora precedenti.
+async fn summarize(
+    previous: Option<&str>,
+    turns: &[ChatTurn],
+    cfg: &AiConfig,
+) -> Option<String> {
+    if turns.is_empty() {
+        return previous.map(str::to_string);
+    }
+    let conversation: String = turns
+        .iter()
+        .filter(|t| !t.content.trim().is_empty())
+        .map(|t| {
+            let who = if t.role == "user" { "Utente" } else { "Assistente" };
+            format!("{who}: {}\n", truncate(&t.content, MAX_TURN_IN_SUMMARY))
+        })
+        .collect();
+
+    let prompt = match previous {
+        Some(before) => format!(
+            "Riassunto di quello che veniva ancora prima:\n{before}\n\nSeguito della conversazione da riassumere insieme al pezzo qui sopra, in un unico riassunto:\n{conversation}"
+        ),
+        None => format!("Conversazione da riassumere:\n{conversation}"),
+    };
+
+    let text = ask(SUMMARIZER, &prompt, cfg).await?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(truncate(text, summary::MAX_SUMMARY_CHARS))
+}
+
 /// Cosa c'era da imparare in questo scambio, se c'era qualcosa. Gira dopo che
 /// la risposta e' gia' a schermo: l'utente non aspetta questa chiamata.
 pub async fn learn(question: &str, answer: &str, cfg: &AiConfig) -> Vec<String> {
@@ -1115,13 +1225,13 @@ mod tests {
     }
 
     #[test]
-    fn history_is_capped_and_cleaned() {
+    fn history_starts_where_it_is_told_to() {
         let history: Vec<ChatTurn> = (0..40)
             .map(|i| ChatTurn { role: if i % 2 == 0 { "user" } else { "ai" }.to_string(), content: format!("m{i}") })
             .collect();
-        let messages = history_messages(&history, "ultimo", &[], false);
+        let messages = history_messages(&history, 10, "ultimo", &[], false);
 
-        assert_eq!(messages.len(), MAX_HISTORY_TURNS + 1);
+        assert_eq!(messages.len(), 31);
         assert_eq!(messages[0]["content"], "m10");
         assert_eq!(messages[0]["role"], "user");
         // I ruoli dell'app ("ai") diventano quelli dell'API ("assistant").
@@ -1130,12 +1240,23 @@ mod tests {
     }
 
     #[test]
+    fn a_start_past_the_end_leaves_only_the_new_message() {
+        // Succede se un riassunto vecchio dice di coprire piu' turni di quanti
+        // ce ne sono: meglio una conversazione corta di un panico.
+        let history =
+            vec![ChatTurn { role: "user".to_string(), content: "unico".to_string() }];
+        let messages = history_messages(&history, 99, "ultimo", &[], false);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"], "ultimo");
+    }
+
+    #[test]
     fn empty_turns_are_dropped() {
         let history = vec![
             ChatTurn { role: "user".to_string(), content: "ciao".to_string() },
             ChatTurn { role: "ai".to_string(), content: "   ".to_string() },
         ];
-        let messages = history_messages(&history, "ci sei?", &[], false);
+        let messages = history_messages(&history, 0, "ci sei?", &[], false);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["content"], "ciao");
         assert_eq!(messages[1]["content"], "ci sei?");
@@ -1393,6 +1514,7 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
         let mut statuses: Vec<String> = Vec::new();
         let reply = runtime
             .block_on(stream_reply(
+                "test_live_web",
                 "chi ha vinto il campionato di Serie A 2024/2025?",
                 &[],
                 &[],
@@ -1425,6 +1547,7 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
         let mut pieces = 0usize;
         let reply = runtime
             .block_on(stream_reply(
+                "test_live_ollama",
                 "Rispondi solo con la parola: pronto",
                 &[],
                 &[],

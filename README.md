@@ -78,9 +78,9 @@ Il modello usato è `claude-opus-5`. Senza chiave l'app resta su Ollama.
 - **Modifica**: qualsiasi messaggio dell'utente si riscrive e riparte da lì. Quello che veniva dopo
   viene lasciato indietro: per tenere anche la strada vecchia si duplica prima la conversazione
   (menu `⋯` nella barra laterale).
-- **Storico**: al modello vanno gli ultimi 30 turni della chat corrente, più le istruzioni
-  personalizzate scritte nelle impostazioni, la data di oggi e quello che ha imparato nelle altre
-  conversazioni (vedi *Memoria*).
+- **Storico**: al modello vanno gli ultimi 30 turni della chat corrente per intero e il riassunto
+  di quelli prima (vedi *Conversazioni lunghe*), più le istruzioni personalizzate scritte nelle
+  impostazioni, la data di oggi e quello che ha imparato nelle altre conversazioni (vedi *Memoria*).
 - **Titolo**: dopo il primo scambio è il modello stesso a proporlo; se non ne esce niente di
   sensato resta la prima frase dell'utente.
 - **Markdown**: titoli, elenchi, citazioni, tabelle, codice con pulsante *Copia*. Il parser è in
@@ -150,6 +150,36 @@ escono solo se accendi gli strumenti sui file *e* usi la Claude API). Gli
 indirizzi locali e di rete interna (`localhost`, `192.168.*`, `*.local`, `169.254.169.254`) sono
 rifiutati, anche dopo un redirect: il modello non può usare l'app per bussare ai servizi di casa.
 
+### Conversazioni lunghe
+
+Oltre i 30 turni i messaggi più vecchi non sparivano: sparivano *muti*, e in una chat lunga
+l'assistente si dimenticava di colpo una decisione presa cento righe prima. Ora quella parte viene
+condensata in un riassunto che resta in testa al prompt di sistema.
+
+Il conto di quando rifarlo è il punto delicato. Rifarlo a ogni messaggio costerebbe una chiamata al
+modello per turno; per questo c'è un margine di **8 turni**: il riassunto copre tutto tranne
+l'ultima finestra, i turni in eccesso vanno al modello per intero, e solo quando ne sono cresciuti
+più di 8 oltre la finestra si rifà il riassunto — includendo il riassunto precedente, così non si
+rilegge mai da capo tutta la conversazione.
+
+| Cosa | Valore |
+|---|---|
+| Turni interi al modello | 30 (fino a 38 fra un riassunto e il successivo) |
+| Margine prima di rifare il riassunto | 8 turni |
+| Lunghezza del riassunto | 2.000 caratteri |
+| Turno letto dal riassuntore | 400 caratteri |
+
+Il riassunto sta in `~/.logica/summaries.json`, non dentro il file della chat: quello lo riscrive il
+frontend a ogni salvataggio, e due scrittori sullo stesso JSON si sovrascriverebbero a vicenda. Se
+la chiamata fallisce si torna al taglio secco di prima — peggio, ma la risposta arriva. Cancellando
+una chat il suo riassunto se ne va con lei; duplicandola, la copia se lo porta dietro. Se modifichi
+un messaggio vecchio e la conversazione riparte da lì, il riassunto che copriva più turni di quanti
+ne restano viene buttato invece di parlare di messaggi che non esistono più.
+
+Al riassuntore è chiesto di copiare esatti nomi, numeri, percorsi e versioni, o di ometterli: un
+riassunto che perde i dati precisi è peggio del taglio che sostituisce, perché sembra che
+l'assistente ricordi mentre ha dimenticato proprio le cose che contano.
+
 ### Memoria
 
 Fino a qui ogni chat nuova ripartiva da zero: l'assistente si ripresentava e ti chiedeva di nuovo
@@ -216,6 +246,7 @@ sola la lettura dei file.
 ├── config.json              istruzioni personalizzate, cartelle raggiungibili dal browser
 ├── preferences.json         tema, motore AI, URL e modello Ollama, ricerca su internet, accesso ai file, memoria
 ├── memory.json              i fatti imparati sull'utente, uno per riga
+├── summaries.json           il riassunto della parte vecchia di ogni chat lunga
 └── chats/
     └── chat_20260829_142530_a1b2.json
 ```
@@ -316,6 +347,7 @@ file-organizer-ai/
     ├── attachments.rs           allegati: testo, PDF, DOCX, immagini in base64
     ├── tools.rs                 strumenti sui file: elenca, legge, cerca (sola lettura)
     ├── memory.rs                i fatti che l'assistente si porta fra una chat e l'altra
+    ├── summary.rs               il riassunto della parte vecchia di una chat lunga
     ├── ai.rs                    configurazione del motore AI e stato della connessione
     └── storage.rs               ~/.logica: chat, ricerca, esportazione, preferenze
 ```
@@ -346,7 +378,7 @@ Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta
 
 ```bash
 cd src-tauri
-cargo test                                   # 78 test offline
+cargo test                                   # 82 test offline
 cargo test -- --ignored live_ollama_stream   # streaming vero contro Ollama
 cargo test -- --ignored live_search          # ricerca vera (DuckDuckGo/Bing)
 cargo test -- --ignored live_research        # ricerca + lettura delle pagine
