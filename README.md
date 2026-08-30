@@ -180,6 +180,49 @@ Al riassuntore è chiesto di copiare esatti nomi, numeri, percorsi e versioni, o
 riassunto che perde i dati precisi è peggio del taglio che sostituisce, perché sembra che
 l'assistente ricordi mentre ha dimenticato proprio le cose che contano.
 
+### Ricerca nei documenti
+
+Gli strumenti sui file trovano quello che sai già come si chiama: un nome, una parola esatta. Non
+trovano *«quel documento dove avevo scritto le condizioni di rimborso»* se dentro la parola
+«rimborso» non c'è. Questa è l'altra metà: ricerca per significato.
+
+I documenti delle cartelle autorizzate vengono tagliati in pezzi da 900 caratteri (200 di
+sovrapposizione, così una frase a cavallo del taglio resta intera da qualche parte) e trasformati in
+vettori **una volta sola**. A ogni domanda si trasforma anche la domanda e si prendono i 5 pezzi più
+vicini, se somigliano abbastanza; sotto la soglia non entra niente nel prompt, invece di infilarci i
+cinque pezzi meno lontani e far rispondere il modello a una domanda di cucina citando un preventivo.
+
+I vettori li calcola **sempre Ollama**, anche quando rispondi con la Claude API: Anthropic non ha un
+endpoint di embedding, e mandare fuori ogni pezzo di ogni documento per indicizzarlo sarebbe il
+contrario di quello che serve qui. Serve `ollama pull nomic-embed-text` — 137M, gira su CPU.
+
+```
+~/.logica/index/
+├── index.json      quali file, quali pezzi, il testo di ognuno
+└── vectors.bin     i vettori, f32 grezzi, uno per pezzo nello stesso ordine
+```
+
+Due file e non uno perché i numeri e il testo hanno bisogni diversi: in JSON i vettori peserebbero
+tre volte tanto e si rileggerebbero molto più piano. `vectors.bin` si scrive **prima** di
+`index.json`: se l'app muore in mezzo, dei vettori più nuovi dell'indice non fanno danni, mentre un
+indice che promette pezzi senza vettori si rifiuterebbe di caricare.
+
+L'indicizzazione è **incrementale**: un file con data e dimensione invariate non viene riletto né
+rimandato a Ollama. La prima volta dura minuti, e l'avanzamento esce come evento `index-progress` —
+si vede file per file in Impostazioni. Cambiando modello di embedding l'indice si rifà da capo: i
+vettori vecchi non sono confrontabili con i nuovi.
+
+| Cosa | Valore |
+|---|---|
+| Pezzo | 900 caratteri, 200 di sovrapposizione |
+| Pezzi in tutto | 8.000 |
+| Estratti nel prompt | 5, solo sopra somiglianza 0,45 |
+| File saltati | immagini, audio, video, archivi, eseguibili, oltre 20 MB |
+
+L'interruttore non si accende finché un indice non esiste, e cancellando l'indice si spegne da solo:
+una ricerca che non può trovare niente non deve costare una chiamata a ogni domanda. Costruire e
+cancellare l'indice si fanno solo dal PC, come tutto quello che legge i file per intero.
+
 ### Memoria
 
 Fino a qui ogni chat nuova ripartiva da zero: l'assistente si ripresentava e ti chiedeva di nuovo
@@ -247,6 +290,7 @@ sola la lettura dei file.
 ├── preferences.json         tema, motore AI, URL e modello Ollama, ricerca su internet, accesso ai file, memoria
 ├── memory.json              i fatti imparati sull'utente, uno per riga
 ├── summaries.json           il riassunto della parte vecchia di ogni chat lunga
+├── index/                   indice dei documenti: index.json + vectors.bin
 └── chats/
     └── chat_20260829_142530_a1b2.json
 ```
@@ -348,6 +392,7 @@ file-organizer-ai/
     ├── tools.rs                 strumenti sui file: elenca, legge, cerca (sola lettura)
     ├── memory.rs                i fatti che l'assistente si porta fra una chat e l'altra
     ├── summary.rs               il riassunto della parte vecchia di una chat lunga
+    ├── rag.rs                   indice dei documenti e ricerca per significato
     ├── ai.rs                    configurazione del motore AI e stato della connessione
     └── storage.rs               ~/.logica: chat, ricerca, esportazione, preferenze
 ```
@@ -369,16 +414,18 @@ file-organizer-ai/
 | `get_preferences` / `set_preferences` | — / `preferences` | `Preferences` / `—` |
 | `get_config` / `set_config` | — / `config` | `Config` / `—` |
 | `get_memory` / `forget_fact` / `clear_memory` | — / `factId` / — | `Fact[]` / `—` / `—` |
+| `index_status` / `build_index` / `clear_index` | — / `ollamaUrl` / — | `IndexStatus` (le ultime due solo desktop) |
 | `check_ai_status` | `ollamaUrl` | `{ ollama, claude, models }` |
 
-Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta, e
-`assistant-status` (`{ chat_id, text }`), cosa sta facendo l'app prima di scrivere.
+Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta;
+`assistant-status` (`{ chat_id, text }`), cosa sta facendo l'app prima di scrivere; e
+`index-progress` (`{ done, total, file }`) durante l'indicizzazione dei documenti.
 
 ## Test
 
 ```bash
 cd src-tauri
-cargo test                                   # 82 test offline
+cargo test                                   # 88 test offline
 cargo test -- --ignored live_ollama_stream   # streaming vero contro Ollama
 cargo test -- --ignored live_search          # ricerca vera (DuckDuckGo/Bing)
 cargo test -- --ignored live_research        # ricerca + lettura delle pagine

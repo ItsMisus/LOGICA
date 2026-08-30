@@ -1,9 +1,19 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
-import { call, isDesktop } from "../api";
+import { call, isDesktop, subscribe } from "../api";
 import RemoteAccessPanel from "./RemoteAccessPanel";
-import { MAX_FACTS, type AiStatus, type Config, type Fact, type Preferences, type Toast } from "../types";
+import {
+  EMBED_MODEL,
+  MAX_FACTS,
+  type AiStatus,
+  type Config,
+  type Fact,
+  type IndexProgress,
+  type IndexStatus,
+  type Preferences,
+  type Toast,
+} from "../types";
 
 interface Props {
   preferences: Preferences;
@@ -44,8 +54,49 @@ export default function SettingsModal({
       .catch(() => setFacts([]));
   }, []);
 
+  const [index, setIndex] = useState<IndexStatus | null>(null);
+  const [indexing, setIndexing] = useState(false);
+  const [progress, setProgress] = useState<IndexProgress | null>(null);
+
+  useEffect(() => {
+    call<IndexStatus>("index_status")
+      .then(setIndex)
+      .catch(() => setIndex(null));
+  }, []);
+
+  // L'indicizzazione dura minuti: senza l'avanzamento sembrerebbe piantata.
+  useEffect(() => subscribe<IndexProgress>("index-progress", setProgress), []);
+
   const claudeReady = status?.claude ?? false;
   const ollamaReady = status?.ollama ?? false;
+
+  async function buildIndex() {
+    setIndexing(true);
+    setProgress(null);
+    try {
+      const built = await call<IndexStatus>("build_index", { ollamaUrl: prefs.ollama_url });
+      setIndex(built);
+      onNotice("success", `Indicizzati ${built.files} file in ${built.pieces} pezzi.`);
+    } catch (e) {
+      onNotice("error", String(e));
+    } finally {
+      setIndexing(false);
+      setProgress(null);
+    }
+  }
+
+  async function dropIndex() {
+    try {
+      await call("clear_index");
+      setIndex(await call<IndexStatus>("index_status"));
+      // Senza indice l'interruttore non ha piu' niente da consultare: si
+      // spegne qui invece di lasciare una ricerca che non trova mai niente.
+      setPrefs((p) => ({ ...p, documents: false }));
+      onNotice("success", "Indice cancellato.");
+    } catch (e) {
+      onNotice("error", String(e));
+    }
+  }
 
   async function forget(id: string) {
     try {
@@ -175,6 +226,60 @@ export default function SettingsModal({
             scrivi tu vengono aperti comunque, anche con l'interruttore spento.
             {!isDesktop && " Si cambia solo dal PC."}
           </p>
+        </section>
+
+        <section>
+          <h3>Documenti</h3>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={prefs.documents}
+              disabled={!isDesktop || (index?.pieces ?? 0) === 0}
+              onChange={(e) => setPrefs((p) => ({ ...p, documents: e.target.checked }))}
+            />
+            <span>Cerca nei documenti indicizzati prima di rispondere</span>
+          </label>
+          <p className="note">
+            Diverso dagli strumenti sui file: quelli trovano un nome o una parola esatta, questo
+            trova per significato — «il documento in cui parlavo delle condizioni di rimborso» anche
+            se la parola «rimborso» dentro non c'è. I documenti delle cartelle autorizzate vengono
+            tagliati a pezzi e trasformati in vettori una volta sola; a ogni domanda si confronta la
+            domanda con i pezzi e i più vicini entrano nel prompt. Se non somiglia niente, non entra
+            niente.
+          </p>
+          <p className="note">
+            I vettori li calcola sempre Ollama, anche in modalità Claude: serve{" "}
+            <code>ollama pull {EMBED_MODEL}</code>. Niente esce dal PC per indicizzare.
+          </p>
+
+          {index && index.pieces > 0 ? (
+            <p className="note">
+              {index.files} file, {index.pieces} pezzi. Ultima indicizzazione:{" "}
+              {new Date(index.built).toLocaleString()}.
+            </p>
+          ) : (
+            <p className="note">Nessun indice: finché non lo costruisci l'interruttore non si accende.</p>
+          )}
+
+          {progress && progress.total > 0 && (
+            <p className="note">
+              Indicizzo {progress.done}/{progress.total}
+              {progress.file && ` — ${progress.file}`}
+            </p>
+          )}
+
+          {isDesktop && (
+            <div className="row-actions">
+              <button className="tool-btn" disabled={indexing} onClick={() => void buildIndex()}>
+                {indexing ? "Indicizzazione in corso…" : index && index.pieces > 0 ? "Aggiorna indice" : "Costruisci indice"}
+              </button>
+              {index && index.pieces > 0 && (
+                <button className="tool-btn" disabled={indexing} onClick={() => void dropIndex()}>
+                  Cancella indice
+                </button>
+              )}
+            </div>
+          )}
         </section>
 
         <section>

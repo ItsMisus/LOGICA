@@ -385,15 +385,42 @@ fn starting_points(path: Option<String>) -> Result<Vec<PathBuf>, String> {
     }
 }
 
+/// Visita ricorsiva dei soli file, per chi deve leggerli tutti: l'indice dei
+/// documenti. Stessi salti di cartella, tetti molto piu' alti — qui non si sta
+/// rispondendo a una domanda, si sta preparando un indice, e un file saltato
+/// vuol dire un documento che poi non si trovera' mai.
+pub fn walk_files(dir: &Path, visited: &mut usize, on_file: &mut impl FnMut(&Path)) {
+    walk_with(dir, 0, MAX_INDEX_DEPTH, MAX_INDEX_VISITS, visited, &mut |path, is_dir| {
+        if !is_dir {
+            on_file(path);
+        }
+    });
+}
+
+/// Profondita' e file visitati durante l'indicizzazione.
+const MAX_INDEX_DEPTH: usize = 12;
+const MAX_INDEX_VISITS: usize = 50_000;
+
 /// Visita ricorsiva con i freni: profondita', numero di file visitati e le
 /// cartelle che non servono mai.
 fn walk(dir: &Path, depth: usize, visited: &mut usize, on_entry: &mut impl FnMut(&Path, bool)) {
-    if depth > MAX_DEPTH || *visited >= MAX_VISITED {
+    walk_with(dir, depth, MAX_DEPTH, MAX_VISITED, visited, on_entry);
+}
+
+fn walk_with(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    max_visited: usize,
+    visited: &mut usize,
+    on_entry: &mut impl FnMut(&Path, bool),
+) {
+    if depth > max_depth || *visited >= max_visited {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
-        if *visited >= MAX_VISITED {
+        if *visited >= max_visited {
             return;
         }
         *visited += 1;
@@ -405,7 +432,7 @@ fn walk(dir: &Path, depth: usize, visited: &mut usize, on_entry: &mut impl FnMut
         }
         on_entry(&path, is_dir);
         if is_dir {
-            walk(&path, depth + 1, visited, on_entry);
+            walk_with(&path, depth + 1, max_depth, max_visited, visited, on_entry);
         }
     }
 }

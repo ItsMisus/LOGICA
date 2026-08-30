@@ -229,6 +229,7 @@ export default function ChatPage() {
       web_search: preferences.web_search,
       file_tools: preferences.file_tools,
       memory: preferences.memory,
+      documents: preferences.documents,
     }),
     [preferences, config.user_preferences],
   );

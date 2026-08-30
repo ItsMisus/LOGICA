@@ -13,6 +13,7 @@ use futures_util::StreamExt;
 use crate::ai::{self, AiConfig, ChatTurn};
 use crate::attachments::Image;
 use crate::memory;
+use crate::rag;
 use crate::summary::{self, Digest};
 use crate::tools::{self, ToolCall, ToolUse};
 use crate::web;
@@ -902,7 +903,20 @@ pub async fn stream_reply(
     let file_tools = cfg.file_tools && tools::available();
     let (older, start) = condense(chat_id, history, cfg, &mut on_status).await;
 
+    // Gli estratti dai documenti costano una sola chiamata di embedding, corta
+    // e locale: non serve chiedere a un modello se convenga cercare, come per
+    // internet. Se niente somiglia abbastanza, non entra niente nel prompt.
+    let documents = if cfg.documents {
+        on_status("Cerco nei tuoi documenti");
+        rag::search(message, &cfg.ollama_url).await
+    } else {
+        Vec::new()
+    };
+
     let mut system = system_prompt(cfg, block.as_deref(), file_tools);
+    if !documents.is_empty() {
+        system.push_str(&format!("\n\n{}", rag::as_prompt_block(&documents)));
+    }
     if let Some(older) = older {
         system.push_str(&format!("\n\n{older}"));
     }

@@ -95,6 +95,10 @@ pub struct Preferences {
     /// e' visibile e cancellabile dalle impostazioni.
     #[serde(default = "enabled")]
     pub memory: bool,
+    /// L'assistente consulta l'indice dei documenti. Spento finche' un indice
+    /// non esiste: senza, ogni domanda pagherebbe una chiamata a vuoto.
+    #[serde(default)]
+    pub documents: bool,
 }
 
 fn enabled() -> bool {
@@ -111,6 +115,7 @@ impl Default for Preferences {
             web_search: true,
             file_tools: false,
             memory: true,
+            documents: false,
         }
     }
 }

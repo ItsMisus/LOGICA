@@ -451,6 +451,14 @@ async fn command(
         },
         "clear_memory" => result(crate::clear_memory()),
 
+        "index_status" => ok(json!(crate::index_status())),
+        // Indicizzare e' un lavoro lungo che legge i file dell'utente: si
+        // avvia dal PC, come le altre cose che toccano il disco per intero.
+        "build_index" | "clear_index" => fail(
+            StatusCode::FORBIDDEN,
+            "L'indice dei documenti si costruisce e si cancella dalla finestra di LOGICA sul PC.",
+        ),
+
         "get_preferences" => ok(json!(crate::get_preferences())),
         "set_preferences" => match parse::<PreferencesArgs>(body) {
             Ok(a) => match keep_engine_settings(a.preferences) {
@@ -528,6 +536,12 @@ fn keep_engine_settings(incoming: Preferences) -> Result<Preferences, String> {
     if incoming.file_tools != current.file_tools {
         return Err(
             "L'accesso ai file si accende e si spegne solo dalla finestra di LOGICA sul PC."
+                .to_string(),
+        );
+    }
+    if incoming.documents != current.documents {
+        return Err(
+            "La ricerca nei documenti si accende e si spegne solo dalla finestra di LOGICA sul PC."
                 .to_string(),
         );
     }

@@ -42,6 +42,10 @@ pub struct AiConfig {
     /// imparato sull'utente.
     #[serde(default = "default_memory")]
     pub memory: bool,
+    /// L'assistente cerca negli estratti dei documenti indicizzati prima di
+    /// rispondere. Serve un indice gia' costruito.
+    #[serde(default)]
+    pub documents: bool,
 }
 
 fn default_memory() -> bool {
@@ -70,6 +74,7 @@ impl Default for AiConfig {
             web_search: default_web_search(),
             file_tools: false,
             memory: default_memory(),
+            documents: false,
         }
     }
 }

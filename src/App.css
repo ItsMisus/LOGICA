@@ -1557,6 +1557,13 @@ button {
   color: var(--faint);
 }
 
+/* Due pulsanti in fila sotto una sezione delle impostazioni. */
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 /* Quello che l'assistente si ricorda, nelle impostazioni. */
 .fact-list {
   list-style: none;

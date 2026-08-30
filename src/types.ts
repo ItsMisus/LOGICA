@@ -125,6 +125,23 @@ export interface Fact {
   chat_id: string;
 }
 
+/** Stato dell'indice dei documenti. */
+export interface IndexStatus {
+  files: number;
+  pieces: number;
+  /** Fine dell'ultima indicizzazione, RFC 3339. Vuoto se non è mai stata fatta. */
+  built: string;
+  model: string;
+}
+
+/** A che punto è l'indicizzazione (evento `index-progress`). */
+export interface IndexProgress {
+  done: number;
+  total: number;
+  /** Il file in corso; vuoto quando ha finito. */
+  file: string;
+}
+
 /* ------------------------------ configurazione ----------------------------- */
 
 export interface Preferences {
@@ -139,6 +156,8 @@ export interface Preferences {
   file_tools: boolean;
   /** L'assistente ricorda fra una chat e l'altra quello che ha imparato. */
   memory: boolean;
+  /** L'assistente consulta l'indice dei documenti prima di rispondere. */
+  documents: boolean;
 }
 
 export interface Config {
@@ -157,6 +176,7 @@ export interface AiConfig {
   web_search: boolean;
   file_tools: boolean;
   memory: boolean;
+  documents: boolean;
 }
 
 export interface AiStatus {
@@ -179,6 +199,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   web_search: true,
   file_tools: false,
   memory: true,
+  documents: false,
 };
 
 export const DEFAULT_CONFIG: Config = {
@@ -186,6 +207,10 @@ export const DEFAULT_CONFIG: Config = {
   profile: "custom",
   user_preferences: "",
 };
+
+/** Modello con cui si calcolano i vettori dei documenti. Deve restare
+ *  allineato a `EMBED_MODEL` in `src-tauri/src/rag.rs`. */
+export const EMBED_MODEL = "nomic-embed-text";
 
 /** Quanti fatti tiene la memoria. Deve restare allineata a `MAX_FACTS` in
  *  `src-tauri/src/memory.rs`. */

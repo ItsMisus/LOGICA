@@ -5,6 +5,7 @@ mod ai;
 mod assistant;
 mod attachments;
 mod memory;
+mod rag;
 mod server;
 mod storage;
 mod summary;
@@ -181,6 +182,45 @@ fn forget_fact(fact_id: String) -> Result<(), String> {
 #[tauri::command]
 fn clear_memory() -> Result<(), String> {
     memory::clear()
+}
+
+/* -------------------------------- documenti ------------------------------- */
+
+/// A che punto e' l'indicizzazione, file per file.
+#[derive(Clone, Serialize)]
+struct IndexProgress {
+    done: usize,
+    total: usize,
+    /// Il file in corso, vuoto quando ha finito.
+    file: String,
+}
+
+#[tauri::command]
+fn index_status() -> rag::IndexStatus {
+    rag::status()
+}
+
+/// Costruisce (o aggiorna) l'indice dei documenti nelle cartelle autorizzate.
+///
+/// Dura minuti la prima volta: l'avanzamento esce come evento, cosi' la
+/// finestra puo' mostrarlo invece di sembrare bloccata.
+#[tauri::command]
+async fn build_index(app: AppHandle, ollama_url: Option<String>) -> Result<rag::IndexStatus, String> {
+    let url = ollama_url.unwrap_or_else(|| storage::load_preferences().ollama_url);
+    let emitter = app.clone();
+    rag::build(&url, &mut move |done, total, file| {
+        emit_all(
+            &emitter,
+            "index-progress",
+            IndexProgress { done, total, file: file.to_string() },
+        );
+    })
+    .await
+}
+
+#[tauri::command]
+fn clear_index() -> Result<(), String> {
+    rag::clear()
 }
 
 /// "Interrompi": il testo gia' scritto resta nella chat.
@@ -425,6 +465,9 @@ fn main() {
             get_memory,
             forget_fact,
             clear_memory,
+            index_status,
+            build_index,
+            clear_index,
             server_status,
             server_start,
             server_stop,
