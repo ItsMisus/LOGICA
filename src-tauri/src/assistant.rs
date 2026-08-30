@@ -141,6 +141,7 @@ Regole:
 - Non scrivere quello che vale solo adesso: la domanda di oggi, il contenuto di un file, un calcolo, una notizia, cosa hai risposto.
 - Non scrivere quello che riguarda te invece dell'utente.
 - Se non c'e' niente da ricordare, rispondi esattamente NIENTE.
+- Scrivi in italiano, anche se lo scambio e' in un'altra lingua: chi legge queste righe si aspetta che comincino per 'L'utente' e scarta le altre.
 
 Esempi.
 Scambio: 'come si scrive una regex in Rust?' / '...'
@@ -162,7 +163,9 @@ Regole:
 - Al massimo 10 righe, ognuna una frase secca. Niente titoli, niente preamboli, niente commenti sul riassunto stesso.
 - Tieni: cosa ha chiesto l'utente, cosa avete deciso, cosa e' rimasto in sospeso, e le sue preferenze emerse qui.
 - Copia esatti i dati concreti: nomi, numeri, percorsi di file, versioni, comandi, termini tecnici. Se un dato non lo puoi riportare preciso, non riportarlo affatto.
-- Non aggiungere niente che non sia scritto nella conversazione.";
+- Non aggiungere niente che non sia scritto nella conversazione.
+- Quando ti do anche un riassunto di prima, riscrivilo insieme al seguito invece di accodarlo. Una cosa che prima era in sospeso e che dopo e' stata decisa e' solo decisa: non lasciarla in tutte e due le liste.
+- Scrivi nella stessa lingua della conversazione.";
 
 /// Caratteri tenuti di ogni turno quando si prepara il testo da riassumere.
 /// Il riassuntore deve vedere di cosa si parlava, non rileggere tutto.
@@ -1647,6 +1650,145 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
         assert!(pieces > 1, "il testo non e' arrivato in streaming ({pieces} pezzi)");
         assert!(!reply.stopped);
         assert!(reply.error.is_none(), "errore: {:?}", reply.error);
+    }
+
+    /// L'estrattore di memoria e' un prompt: i test offline provano solo la
+    /// pulizia delle righe che tornano indietro. Questo prova che un modello
+    /// vero, leggendo uno scambio, tira fuori il fatto giusto e scarta quello
+    /// che vale solo adesso.
+    /// `cargo test -- --ignored live_memory --nocapture`
+    #[test]
+    #[ignore]
+    fn live_memory_keeps_what_lasts_and_drops_what_does_not() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime tokio");
+        let cfg = AiConfig {
+            ollama_model: std::env::var("FOAI_TEST_MODEL")
+                .unwrap_or_else(|_| "qwen3:30b-a3b".to_string()),
+            ..AiConfig::default()
+        };
+
+        // Scambio con dentro un fatto che dura e uno che scade.
+        let facts = runtime.block_on(learn(
+            "Mi chiamo Franco e sto scrivendo un gestionale in Rust. Quanto fa 17 per 23?",
+            "391.",
+            &cfg,
+        ));
+        eprintln!("fatti: {facts:?}");
+        let tutti = facts.join(" ").to_lowercase();
+        assert!(!facts.is_empty(), "non ha imparato niente da uno scambio che dice nome e progetto");
+        assert!(tutti.contains("franco"), "il nome non e' stato ricordato: {facts:?}");
+        assert!(
+            !tutti.contains("391"),
+            "ha ricordato il risultato di un calcolo, che fra un mese non serve: {facts:?}"
+        );
+        // Il formato lo impone `clean_facts`, ma qui si controlla che il
+        // modello non lo faccia saltare del tutto.
+        assert!(facts.len() <= MAX_NEW_FACTS_ALLOWED, "troppi fatti in un colpo: {facts:?}");
+
+        // Uno scambio puramente tecnico non deve lasciare niente.
+        let niente = runtime.block_on(learn(
+            "Come si scrive una regex in Rust?",
+            r##"Usa il crate regex: Regex::new(r"\d+")."##,
+            &cfg,
+        ));
+        eprintln!("da uno scambio tecnico: {niente:?}");
+        assert!(
+            niente.is_empty(),
+            "ha imparato qualcosa da una domanda tecnica senza niente di personale: {niente:?}"
+        );
+    }
+
+    /// Quante righe puo' produrre un giro di estrazione: `clean_facts` taglia
+    /// a 3, e il test dal vivo non deve poter passare per caso con di piu'.
+    const MAX_NEW_FACTS_ALLOWED: usize = 3;
+
+    /// Il riassunto della parte vecchia e' l'altro prompt che non si puo'
+    /// provare offline. Quello che conta e' che i dati concreti sopravvivano:
+    /// un riassunto che perde il nome del file o il numero di versione non
+    /// serve a continuare la conversazione.
+    /// `cargo test -- --ignored live_summary --nocapture`
+    #[test]
+    #[ignore]
+    fn live_summary_keeps_the_concrete_details() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime tokio");
+        let cfg = AiConfig {
+            ollama_model: std::env::var("FOAI_TEST_MODEL")
+                .unwrap_or_else(|_| "qwen3:30b-a3b".to_string()),
+            ..AiConfig::default()
+        };
+
+        let turns = vec![
+            ChatTurn {
+                role: "user".to_string(),
+                content: "Sto migrando il progetto da PostgreSQL 14 a PostgreSQL 16. La tabella \
+                          che mi preoccupa si chiama ordini_2019 e ha 4 milioni di righe."
+                    .to_string(),
+            },
+            ChatTurn {
+                role: "ai".to_string(),
+                content: "Fai prima un dump di ordini_2019 e prova la migrazione su una copia."
+                    .to_string(),
+            },
+            ChatTurn {
+                role: "user".to_string(),
+                content: "Va bene. Ricordati che il server sta su 192.168.1.40 e che devo finire \
+                          entro venerdi'."
+                    .to_string(),
+            },
+            ChatTurn {
+                role: "ai".to_string(),
+                content: "Segnato. Restano da decidere gli indici da ricreare dopo il caricamento."
+                    .to_string(),
+            },
+        ];
+
+        let summary = runtime
+            .block_on(summarize(None, &turns, &cfg))
+            .expect("il riassunto non e' arrivato");
+        eprintln!("riassunto:\n{summary}");
+
+        for dato in ["ordini_2019", "16", "192.168.1.40"] {
+            assert!(
+                summary.contains(dato),
+                "il riassunto ha perso un dato concreto ({dato}):\n{summary}"
+            );
+        }
+        assert!(
+            summary.chars().count() <= crate::summary::MAX_SUMMARY_CHARS,
+            "riassunto piu' lungo del limite: {} caratteri",
+            summary.chars().count()
+        );
+
+        // Un secondo giro deve ripiegare dentro il riassunto precedente
+        // invece di ricominciare da capo.
+        let ancora = vec![ChatTurn {
+            role: "user".to_string(),
+            content: "Ho deciso: ricreo gli indici dopo il caricamento.".to_string(),
+        }];
+        let unito = runtime
+            .block_on(summarize(Some(&summary), &ancora, &cfg))
+            .expect("il secondo riassunto non e' arrivato");
+        eprintln!("riassunto unito:\n{unito}");
+        assert!(
+            unito.contains("ordini_2019"),
+            "il riassunto vecchio e' stato buttato via invece di essere ripiegato:\n{unito}"
+        );
+        // Una cosa decisa nel seguito non deve restare anche fra le cose da
+        // decidere: altrimenti i sospesi gia' chiusi si accumulano a ogni giro.
+        let basso = unito.to_lowercase();
+        assert!(
+            !basso.contains("da decidere") && !basso.contains("in sospeso"),
+            "gli indici sono stati decisi ma il riassunto li tiene ancora in sospeso:\n{unito}"
+        );
+        // Il prompt e' scritto in italiano, ma non basta: senza dirlo il
+        // modello scivola in inglese, e l'assistente continua una
+        // conversazione italiana leggendo un riassunto inglese.
+        for inglese in [" the ", " and ", "pending", "deadline", "migrating"] {
+            assert!(
+                !basso.contains(inglese),
+                "il riassunto e' scivolato in inglese ({inglese}):\n{unito}"
+            );
+        }
     }
 
     #[test]
