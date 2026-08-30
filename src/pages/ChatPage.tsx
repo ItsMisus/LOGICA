@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 
 import { call, isDesktop, subscribe } from "../api";
@@ -7,6 +7,7 @@ import ChatView from "../components/ChatView";
 import NotificationToast from "../components/NotificationToast";
 import Sidebar from "../components/Sidebar";
 import SettingsModal from "../components/SettingsModal";
+import CommandPalette, { type Command } from "../components/CommandPalette";
 
 import {
   DEFAULT_CONFIG,
@@ -131,6 +132,7 @@ export default function ChatPage() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   // L'ascoltatore degli eventi vive quanto la pagina: la chat corrente e i
@@ -552,17 +554,129 @@ export default function ChatPage() {
     }
   }
 
-  // Ctrl+N apre una conversazione nuova, come nel resto del sistema.
+  // Ctrl+N apre una conversazione nuova, Ctrl+K la palette dei comandi: sono
+  // le due scorciatoie che chi usa l'app conosce gia' da altrove.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.ctrlKey && e.key.toLowerCase() === "n") {
+      const combo = e.ctrlKey || e.metaKey;
+      if (combo && e.key.toLowerCase() === "n") {
         e.preventDefault();
         newChat();
+      } else if (combo && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((open) => !open);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [newChat]);
+
+  /**
+   * Le voci della palette. Sono qui e non dentro il componente perche' solo
+   * la pagina sa aprire una conversazione o cambiare motore; la palette
+   * filtra e basta.
+   */
+  const commands = useMemo<Command[]>(() => {
+    const items: Command[] = [
+      {
+        id: "nuova",
+        group: "Vai a",
+        label: "Nuova conversazione",
+        hint: "Ctrl+N",
+        run: newChat,
+      },
+      {
+        id: "impostazioni",
+        group: "Vai a",
+        label: "Impostazioni",
+        run: () => setSettingsOpen(true),
+      },
+      {
+        id: "barra",
+        group: "Vai a",
+        label: sidebarOpen ? "Nascondi la barra laterale" : "Mostra la barra laterale",
+        run: () => setSidebarOpen((open) => !open),
+      },
+      {
+        id: "tema",
+        group: "Vai a",
+        label: preferences.theme === "dark" ? "Passa al tema chiaro" : "Passa al tema scuro",
+        run: () => {
+          const theme = preferences.theme === "dark" ? "light" : "dark";
+          void saveSettings({ ...preferences, theme }, config);
+        },
+      },
+    ];
+
+    // Il motore vale per questa conversazione: la voce non compare finche' non
+    // c'e' niente fra cui scegliere.
+    const models = status?.models ?? [];
+    if (models.length > 0 || status?.claude) {
+      items.push({
+        id: "motore-default",
+        group: "Motore di questa chat",
+        label: `Usa il predefinito (${engineLabelOf(DEFAULT_ENGINE, preferences)})`,
+        run: () => pickEngine(DEFAULT_ENGINE),
+      });
+      if (status?.claude) {
+        items.push({
+          id: "motore-claude",
+          group: "Motore di questa chat",
+          label: "Usa claude-api",
+          run: () => pickEngine("claude"),
+        });
+      }
+      for (const model of models) {
+        items.push({
+          id: `motore-${model}`,
+          group: "Motore di questa chat",
+          label: `Usa ${model}`,
+          run: () => pickEngine(`ollama:${model}`),
+        });
+      }
+    }
+
+    if (messages.length > 0) {
+      items.push(
+        {
+          id: "esporta-md",
+          group: "Conversazione",
+          label: "Esporta in Markdown",
+          run: () => void exportChat(chatId, "markdown"),
+        },
+        {
+          id: "esporta-json",
+          group: "Conversazione",
+          label: "Esporta in JSON",
+          run: () => void exportChat(chatId, "json"),
+        },
+      );
+    }
+
+    for (const chat of chats.filter((c) => c.id !== chatId).slice(0, 20)) {
+      items.push({
+        id: `chat-${chat.id}`,
+        group: "Conversazioni",
+        label: chat.title,
+        hint: new Date(chat.updated).toLocaleDateString(),
+        run: () => void selectChat(chat.id),
+      });
+    }
+
+    return items;
+  }, [
+    newChat,
+    sidebarOpen,
+    preferences,
+    config,
+    status,
+    pickEngine,
+    messages.length,
+    exportChat,
+    chatId,
+    chats,
+    selectChat,
+  ]);
 
   const online = preferences.use_premium_ai ? (status?.claude ?? false) : (status?.ollama ?? false);
   // Etichetta corta per il riquadro del composer: solo il nome del modello.
@@ -614,6 +728,10 @@ export default function ChatPage() {
           onClose={() => setSettingsOpen(false)}
           onNotice={toast}
         />
+      )}
+
+      {paletteOpen && (
+        <CommandPalette commands={commands} onClose={() => setPaletteOpen(false)} />
       )}
 
       <NotificationToast toasts={toasts} onDismiss={dismissToast} />

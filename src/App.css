@@ -1557,6 +1557,86 @@ button {
   color: var(--faint);
 }
 
+/* Palette dei comandi (Ctrl+K). Sta in alto e non al centro: cosi' non
+   salta quando la lista si accorcia mentre si scrive. */
+.palette {
+  width: min(560px, 100%);
+  margin-top: 12vh;
+  /* Il backdrop e' una griglia con place-items: center. */
+  align-self: start;
+  border: 1px solid var(--border-strong);
+  background: var(--sidebar-bg);
+  box-shadow: var(--shadow);
+}
+
+.palette-input {
+  width: 100%;
+  padding: 14px 16px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.95rem;
+  outline: none;
+}
+
+.palette-list {
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: 6px 0 8px;
+}
+
+.palette-group {
+  padding: 10px 16px 4px;
+  font-size: var(--label-size);
+  letter-spacing: var(--label-spacing);
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.palette-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.palette-item.selected {
+  background: var(--surface-2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Il titolo di una conversazione puo' essere lungo: si taglia lui, non la
+   scorciatoia a destra. */
+.palette-item > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-hint {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.palette-empty {
+  padding: 14px 16px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 /* Un file trascinato sopra la finestra: il riquadro dice dove lasciarlo. */
 .composer-box.dragging {
   border-color: var(--accent);

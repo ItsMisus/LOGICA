@@ -98,7 +98,19 @@ divieto di fingere accessi che non ha. Quel pezzo sui file ha due versioni, scel
 strumenti siano accesi o spenti: dire insieme "non puoi leggere niente" e "ecco le cartelle che puoi
 leggere" manda in confusione un modello piccolo.
 
-Scorciatoie: **Invio** manda, **Shift+Invio** va a capo, **Ctrl+N** apre una conversazione nuova.
+Scorciatoie: **Invio** manda, **Shift+Invio** va a capo, **Ctrl+N** apre una conversazione nuova,
+**Ctrl+K** apre la palette dei comandi.
+
+### Palette dei comandi
+
+`Ctrl+K` (o `Cmd+K`) apre un campo in cui si scrive invece di cercare col mouse: nuova
+conversazione, impostazioni, tema, barra laterale, il motore di questa chat, esportazione, e le
+ultime venti conversazioni per titolo. Frecce per scorrere, Invio per eseguire, Esc per chiudere.
+
+La corrispondenza è per **sottosequenza**: `nco` trova «Nuova conversazione». È come si comporta
+ogni palette che si è già usata altrove, e su qualche decina di voci non serve niente di più furbo.
+Il componente non sa cosa fa l'app: riceve le voci già pronte da `ChatPage`, che è l'unica che sa
+aprire una conversazione o cambiare motore.
 
 ### Allegati
 
