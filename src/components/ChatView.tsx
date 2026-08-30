@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 
 import Composer from "./Composer";
 import Message from "./Message";
-import type { ChatMessage } from "../types";
+import type { ChatEngine, ChatMessage } from "../types";
 
 interface Props {
   messages: ChatMessage[];
@@ -13,6 +13,14 @@ interface Props {
   statusText: string | null;
   online: boolean;
   engineLabel: string;
+  /** Motore scelto per questa chat, vuoto se vale quello delle impostazioni. */
+  engine: ChatEngine;
+  /** Il motore delle impostazioni, voce "predefinito" del menu. */
+  defaultLabel: string;
+  /** Modelli Ollama installati, per il menu del composer. */
+  engineChoices: string[];
+  claudeReady: boolean;
+  onPickEngine: (engine: ChatEngine) => void;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   onSend: (text: string, attachmentPaths: string[]) => void;
@@ -49,6 +57,11 @@ export default function ChatView({
   statusText,
   online,
   engineLabel,
+  engine,
+  defaultLabel,
+  engineChoices,
+  claudeReady,
+  onPickEngine,
   sidebarOpen,
   onToggleSidebar,
   onSend,
@@ -83,6 +96,11 @@ export default function ChatView({
       disabled={false}
       placeholder={online ? "Scrivi a Logica..." : "Nessun modello attivo: controlla le impostazioni"}
       engineLabel={engineLabel}
+      engine={engine}
+      defaultLabel={defaultLabel}
+      engineChoices={engineChoices}
+      claudeReady={claudeReady}
+      onPickEngine={onPickEngine}
       online={online}
       autoFocus
       onSend={(text, paths) => {

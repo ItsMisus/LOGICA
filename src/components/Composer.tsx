@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { isDesktop } from "../api";
+import type { ChatEngine } from "../types";
 
 interface Props {
   /** Vero mentre la risposta e' in arrivo: il pulsante diventa "interrompi". */
@@ -10,6 +11,16 @@ interface Props {
   placeholder: string;
   /** Etichetta del motore mostrata nella barra, es. "llama3.1:8b". */
   engineLabel: string;
+  /** Motore scelto per questa chat; vuoto = quello delle impostazioni. */
+  engine: ChatEngine;
+  /** Come si chiama il motore delle impostazioni: e' la voce "predefinito" del
+   *  menu, e resta quella anche quando la chat ne ha scelto un altro. */
+  defaultLabel: string;
+  /** Modelli Ollama installati. Vuoto quando Ollama non risponde: allora
+   *  l'etichetta resta un'etichetta e non diventa un menu con una voce sola. */
+  engineChoices: string[];
+  claudeReady: boolean;
+  onPickEngine: (engine: ChatEngine) => void;
   /** Motore raggiungibile: colora il quadratino di stato accanto al modello. */
   online: boolean;
   autoFocus?: boolean;
@@ -45,6 +56,11 @@ export default function Composer({
   disabled,
   placeholder,
   engineLabel,
+  engine,
+  defaultLabel,
+  engineChoices,
+  claudeReady,
+  onPickEngine,
   online,
   autoFocus,
   onSend,
@@ -145,7 +161,25 @@ export default function Composer({
 
           <span className="composer-engine" title={online ? "motore attivo" : "nessun modello attivo"}>
             <span className={`engine-dot ${online ? "on" : "off"}`} aria-hidden="true" />
-            {engineLabel}
+            {engineChoices.length > 0 || claudeReady ? (
+              <select
+                className="engine-pick"
+                value={engine}
+                aria-label="Motore di questa conversazione"
+                title="Vale solo per questa conversazione"
+                onChange={(e) => onPickEngine(e.target.value)}
+              >
+                <option value="">{defaultLabel} (predefinito)</option>
+                {claudeReady && <option value="claude">claude-api</option>}
+                {engineChoices.map((model) => (
+                  <option key={model} value={`ollama:${model}`}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              engineLabel
+            )}
           </span>
 
           {streaming ? (

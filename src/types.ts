@@ -69,6 +69,40 @@ export interface ChatMetadata {
   created: string;
   updated: string;
   message_count: number;
+  /** Motore scelto per questa conversazione. Assente = quello delle
+   *  impostazioni. */
+  engine?: ChatEngine;
+}
+
+/** Motore di una singola conversazione: `claude`, oppure `ollama:<modello>`.
+ *  Il formato è una stringa sola perché è quello che finisce nel file della
+ *  chat, e due campi separati si potrebbero salvare incoerenti fra loro. */
+export type ChatEngine = string;
+
+/** Il motore delle impostazioni, quando la chat non ne sceglie uno suo. */
+export const DEFAULT_ENGINE = "";
+
+/** Scioglie `engine` nei due campi che il backend si aspetta. Un valore che
+ *  non si riconosce vale come "usa le impostazioni": una chat scritta da una
+ *  versione futura non deve rompersi qui. */
+export function engineOverride(
+  engine: ChatEngine | undefined,
+  fallback: { use_premium_ai: boolean; ollama_model: string },
+): { use_premium_ai: boolean; ollama_model: string } {
+  if (engine === "claude") return { use_premium_ai: true, ollama_model: fallback.ollama_model };
+  if (engine?.startsWith("ollama:")) {
+    return { use_premium_ai: false, ollama_model: engine.slice("ollama:".length) };
+  }
+  return fallback;
+}
+
+/** Come si chiama un motore, per l'etichetta nella barra del composer. */
+export function engineLabelOf(
+  engine: ChatEngine | undefined,
+  fallback: { use_premium_ai: boolean; ollama_model: string },
+): string {
+  const resolved = engineOverride(engine, fallback);
+  return resolved.use_premium_ai ? "claude-api" : resolved.ollama_model;
 }
 
 export interface StoredChat extends ChatMetadata {

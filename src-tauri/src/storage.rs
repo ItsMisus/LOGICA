@@ -52,6 +52,10 @@ pub struct ChatMetadata {
     pub updated: String,
     #[serde(default)]
     pub message_count: usize,
+    /// Motore scelto per questa conversazione: `claude`, oppure
+    /// `ollama:<modello>`. Assente = quello delle impostazioni.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
 }
 
 /// Una conversazione in cui il testo cercato compare, con il pezzo di
@@ -293,6 +297,8 @@ pub fn duplicate_chat(chat_id: &str) -> Result<ChatMetadata, String> {
             created: now.to_rfc3339(),
             updated: now.to_rfc3339(),
             message_count: source.messages.len(),
+            // La copia continua col motore su cui si stava parlando.
+            engine: source.metadata.engine.clone(),
         },
         messages: source.messages,
     };
@@ -529,6 +535,7 @@ pub(crate) mod tests {
                 created: "2026-08-29T10:00:00Z".to_string(),
                 updated: "2026-08-29T10:00:00Z".to_string(),
                 message_count: 0,
+                engine: None,
             },
             messages: vec![ChatMessage {
                 id: "m1".to_string(),

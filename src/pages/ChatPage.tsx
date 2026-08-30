@@ -16,6 +16,10 @@ import {
   type AttachmentImage,
   type AssistantDelta,
   type AssistantStatus,
+  DEFAULT_ENGINE,
+  engineLabelOf,
+  engineOverride,
+  type ChatEngine,
   type ChatMatch,
   type ChatMessage,
   type ChatMetadata,
@@ -115,6 +119,8 @@ export default function ChatPage() {
   const [chatId, setChatId] = useState<string>(newChatId);
   const [created, setCreated] = useState<string>(() => new Date().toISOString());
   const [title, setTitle] = useState(UNTITLED);
+  // Motore di questa sola conversazione. Vuoto = quello delle impostazioni.
+  const [engine, setEngine] = useState<ChatEngine>(DEFAULT_ENGINE);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
   /** Testo in arrivo dal modello: vive fuori da `messages` finche' non finisce. */
@@ -205,6 +211,10 @@ export default function ChatPage() {
         created,
         updated: new Date().toISOString(),
         message_count: msgs.length,
+        // Un motore scelto per questa chat va nel suo file: riaprendola si
+        // riparte da li', non da quello che nel frattempo dicono le
+        // impostazioni.
+        engine: engine || undefined,
         messages: msgs,
         ...patch,
       };
@@ -215,23 +225,22 @@ export default function ChatPage() {
         toast("error", `Conversazione non salvata: ${String(e)}`);
       }
     },
-    [chatId, title, created, toast],
+    [chatId, title, created, engine, toast],
   );
 
   /* ------------------------------ conversazione ----------------------------- */
 
   const aiConfig = useCallback(
     () => ({
-      use_premium_ai: preferences.use_premium_ai,
+      ...engineOverride(engine, preferences),
       ollama_url: preferences.ollama_url,
-      ollama_model: preferences.ollama_model,
       user_preferences: config.user_preferences,
       web_search: preferences.web_search,
       file_tools: preferences.file_tools,
       memory: preferences.memory,
       documents: preferences.documents,
     }),
-    [preferences, config.user_preferences],
+    [engine, preferences, config.user_preferences],
   );
 
   /**
@@ -337,17 +346,20 @@ export default function ChatPage() {
             toast("error", `${failed.name}: ${failed.error}`);
           }
           const images = attachments.filter((a) => a.image).length;
-          if (images > 0 && !preferences.use_premium_ai && !seesImages(preferences.ollama_model)) {
+          // Il modello che conta e' quello di questa chat, che puo' non essere
+          // quello delle impostazioni.
+          const engineNow = engineOverride(engine, preferences);
+          if (images > 0 && !engineNow.use_premium_ai && !seesImages(engineNow.ollama_model)) {
             toast(
               "info",
-              `${preferences.ollama_model} non guarda le immagini: scegli un modello con la vista (llava, llama3.2-vision) o passa a Claude.`,
+              `${engineNow.ollama_model} non guarda le immagini: scegli un modello con la vista (llava, llama3.2-vision) o passa a Claude.`,
             );
           }
         }
         await run(text, messages, attachments);
       })();
     },
-    [run, messages, toast, preferences.use_premium_ai, preferences.ollama_model],
+    [run, messages, toast, engine, preferences.use_premium_ai, preferences.ollama_model],
   );
 
   const stop = useCallback(() => {
@@ -383,6 +395,7 @@ export default function ChatPage() {
     setChatId(newChatId());
     setCreated(new Date().toISOString());
     setTitle(UNTITLED);
+    setEngine(DEFAULT_ENGINE);
     setMessages([]);
     setStreamingText(null);
     setStatusText(null);
@@ -398,6 +411,7 @@ export default function ChatPage() {
         setChatId(id);
         setCreated(chat.created);
         setTitle(chat.title);
+        setEngine(chat.engine ?? DEFAULT_ENGINE);
         setMessages(chat.messages);
         setStreamingText(null);
         setStatusText(null);
@@ -407,6 +421,21 @@ export default function ChatPage() {
       }
     },
     [chatId, stop, toast],
+  );
+
+  /**
+   * Cambia motore per questa sola conversazione. Se la chat esiste gia' su
+   * disco la scelta ci finisce subito: chiudere la finestra prima del prossimo
+   * messaggio non deve perderla.
+   */
+  const pickEngine = useCallback(
+    (choice: ChatEngine) => {
+      setEngine(choice);
+      if (messages.length > 0) {
+        void persist(messages, { engine: choice || undefined });
+      }
+    },
+    [messages, persist],
   );
 
   /** Cerca dentro le conversazioni: la lista la disegna la barra laterale. */
@@ -530,7 +559,7 @@ export default function ChatPage() {
 
   const online = preferences.use_premium_ai ? (status?.claude ?? false) : (status?.ollama ?? false);
   // Etichetta corta per il riquadro del composer: solo il nome del modello.
-  const engineLabel = preferences.use_premium_ai ? "claude-api" : preferences.ollama_model;
+  const engineLabel = engineLabelOf(engine, preferences);
 
   return (
     <div className={`layout ${sidebarOpen ? "" : "no-sidebar"}`}>
@@ -555,6 +584,11 @@ export default function ChatPage() {
         statusText={statusText}
         online={online}
         engineLabel={engineLabel}
+        engine={engine}
+        defaultLabel={engineLabelOf(DEFAULT_ENGINE, preferences)}
+        engineChoices={status?.models ?? []}
+        claudeReady={status?.claude ?? false}
+        onPickEngine={pickEngine}
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
         onSend={send}

@@ -83,6 +83,11 @@ Il modello usato è `claude-opus-5`. Senza chiave l'app resta su Ollama.
   impostazioni, la data di oggi e quello che ha imparato nelle altre conversazioni (vedi *Memoria*).
 - **Titolo**: dopo il primo scambio è il modello stesso a proporlo; se non ne esce niente di
   sensato resta la prima frase dell'utente.
+- **Modello per conversazione**: l'etichetta accanto al pulsante di invio è un menu. La scelta vale
+  solo per quella chat e viene salvata nel suo file (`engine`: `claude` oppure `ollama:<modello>`),
+  così riaprendola si riparte da lì e non da quello che nel frattempo dicono le impostazioni. Un 7B
+  veloce per due chiacchiere, un 14B per il codice, senza passare da Impostazioni ogni volta. Una
+  chat duplicata si porta dietro il suo motore.
 - **Markdown**: titoli, elenchi, citazioni, tabelle, codice con pulsante *Copia*. Il parser è in
   `src/components/Markdown.tsx`, senza librerie e senza `dangerouslySetInnerHTML`: il testo del
   modello non può iniettare HTML.
