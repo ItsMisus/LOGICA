@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 
 use crate::ai::{self, AiConfig, ChatTurn};
 use crate::attachments::Image;
+use crate::memory;
 use crate::tools::{self, ToolCall, ToolUse};
 use crate::web;
 
@@ -38,13 +39,18 @@ COME SCRIVI
 COSA SEI E COSA NON PUOI FARE
 - Sei un assistente generale: qualsiasi argomento, dal codice alla vita di tutti i giorni.
 - Quando serve, l'app cerca su internet per te e ti mette i risultati sotto gli occhi in un blocco RISULTATI DAL WEB. Se quel blocco non c'e', non hai cercato niente: rispondi con quello che sai e dillo.
-- Non hai accesso alla posta o ad altri programmi.
-- Ricordi solo la chat corrente: le altre conversazioni non le vedi.";
+- Non hai accesso alla posta o ad altri programmi.";
+
+/// Cosa dire quando la memoria e' spenta o non c'e' ancora niente dentro. O
+/// si dice che si ricorda solo questa chat, o si elencano le cose che si
+/// ricordano: mai le due insieme.
+const NO_MEMORY: &str = "Ricordi solo la chat corrente: le altre conversazioni non le vedi.";
 
 /// Cosa dire quando gli strumenti sui file sono spenti o non c'e' nessuna
-/// cartella autorizzata. Sta fuori dal prompt fisso perche' l'alternativa
-/// (l'elenco delle cartelle leggibili) la contraddirebbe riga per riga, e un
-/// modello piccolo davanti a due istruzioni opposte ne sceglie una a caso.
+/// cartella autorizzata. Sta fuori dal prompt fisso per la stessa ragione:
+/// l'alternativa (l'elenco delle cartelle leggibili) lo contraddirebbe riga
+/// per riga, e un modello piccolo davanti a due istruzioni opposte ne sceglie
+/// una a caso.
 const NO_FILE_ACCESS: &str = "Non hai accesso ai file del computer: vedi solo questa conversazione e gli allegati. Se ti chiedono di aprire, cercare o spostare qualcosa sul disco, dillo invece di fingere di averlo fatto; l'utente puo' autorizzare una cartella dalle impostazioni dell'app.";
 
 /// Timeout sull'intera risposta in streaming. Un 7B lento sta ben sotto,
@@ -119,6 +125,30 @@ Utente: cerca online il prezzo della RTX 5090
 SERVE: si
 QUERY: prezzo RTX 5090";
 
+/// Prompt del passo che decide cosa vale la pena ricordare oltre la chat.
+///
+/// E' separato dalla risposta, come il pianificatore della ricerca: chiedere
+/// al modello di rispondere *e* di annotare cosa ha imparato lo porta a fare
+/// male le due cose. Il rischio qui non e' dimenticare, e' ricordare troppo:
+/// una memoria piena di dettagli di ieri e' peggio di una memoria vuota.
+const MEMORY_EXTRACTOR: &str = "Sei un estrattore di memoria. Leggi lo scambio e scrivi solo i fatti che varra' la pena sapere anche fra un mese, in una conversazione diversa: come si chiama l'utente, che lavoro fa, che strumenti e linguaggi usa, preferenze stabili su come vuole le risposte, progetti in corso, vincoli suoi.
+
+Regole:
+- Un fatto per riga, al massimo 3 righe, niente elenchi puntati e niente numerazione.
+- Ogni riga e' una frase breve in terza persona che comincia con 'L'utente'.
+- Non scrivere quello che vale solo adesso: la domanda di oggi, il contenuto di un file, un calcolo, una notizia, cosa hai risposto.
+- Non scrivere quello che riguarda te invece dell'utente.
+- Se non c'e' niente da ricordare, rispondi esattamente NIENTE.
+
+Esempi.
+Scambio: 'come si scrive una regex in Rust?' / '...'
+NIENTE
+
+Scambio: 'mi chiamo Franco e lavoro su un gestionale in Rust, rispondimi sempre in italiano' / '...'
+L'utente si chiama Franco
+L'utente lavora a un gestionale scritto in Rust
+L'utente vuole le risposte in italiano";
+
 /// Esito di un turno: il testo completo, piu' come e' finito.
 pub struct Reply {
     pub text: String,
@@ -171,6 +201,10 @@ fn system_prompt(cfg: &AiConfig, web_block: Option<&str>, file_tools: bool) -> S
         prompt.push_str(&format!("\n\n{}", tools::roots_block()));
     } else {
         prompt.push_str(&format!("\n- {NO_FILE_ACCESS}"));
+    }
+    match cfg.memory.then(memory::prompt_block).flatten() {
+        Some(block) => prompt.push_str(&format!("\n\n{block}")),
+        None => prompt.push_str(&format!("\n- {NO_MEMORY}")),
     }
     prompt.push_str(&format!(
         "\n\nData di oggi: {}. Usala per capire riferimenti come 'oggi' o 'l'anno scorso'.",
@@ -1000,6 +1034,44 @@ pub async fn suggest_title(question: &str, answer: &str, cfg: &AiConfig) -> Opti
     }
 }
 
+/// Cosa c'era da imparare in questo scambio, se c'era qualcosa. Gira dopo che
+/// la risposta e' gia' a schermo: l'utente non aspetta questa chiamata.
+pub async fn learn(question: &str, answer: &str, cfg: &AiConfig) -> Vec<String> {
+    let prompt = format!(
+        "Scambio:\nUtente: {}\nAssistente: {}",
+        truncate(question, 1500),
+        truncate(answer, 1500)
+    );
+    match ask(MEMORY_EXTRACTOR, &prompt, cfg).await {
+        Some(text) => clean_facts(&text),
+        None => Vec::new(),
+    }
+}
+
+/// Legge la risposta dell'estrattore. I modelli piccoli antepongono trattini,
+/// numeri e frasi di servizio: si tiene solo quello che assomiglia a un fatto.
+fn clean_facts(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches(|c: char| c == '-' || c == '*' || c == '•' || c.is_numeric() || c == '.' || c == ')')
+                .trim()
+                .trim_matches(|c: char| c == '"' || c == '\'' || c == '*')
+                .trim()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        // "NIENTE", ma anche "NIENTE da ricordare": il rifiuto resta un rifiuto.
+        .filter(|line| !line.to_lowercase().starts_with("niente"))
+        // Una riga di preambolo ("Ecco i fatti:") non e' un fatto.
+        .filter(|line| !line.ends_with(':'))
+        // L'estrattore deve parlare dell'utente. Quando scivola sul contenuto
+        // della risposta, la riga non comincia cosi'.
+        .filter(|line| line.to_lowercase().starts_with("l'utente") || line.to_lowercase().starts_with("lutente"))
+        .take(3)
+        .collect()
+}
+
 fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -1079,6 +1151,43 @@ mod tests {
         // Senza istruzioni non si aggiunge una sezione vuota.
         let plain = system_prompt(&AiConfig::default(), None, false);
         assert!(!plain.contains("Istruzioni scritte dall'utente"));
+    }
+
+    #[test]
+    fn nothing_to_remember_stays_nothing() {
+        assert!(clean_facts("NIENTE").is_empty());
+        assert!(clean_facts("Niente da ricordare.").is_empty());
+        assert!(clean_facts("   \n  \n").is_empty());
+    }
+
+    #[test]
+    fn facts_survive_the_decorations_small_models_add() {
+        let facts = clean_facts(
+            "Ecco i fatti:\n- L'utente si chiama Franco\n2. L'utente lavora in Rust\n\"L'utente vuole risposte in italiano\"",
+        );
+        assert_eq!(
+            facts,
+            vec![
+                "L'utente si chiama Franco",
+                "L'utente lavora in Rust",
+                "L'utente vuole risposte in italiano",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_summary_of_the_answer_is_not_a_fact() {
+        // L'estrattore scivola spesso sul contenuto della risposta: quelle
+        // righe non parlano dell'utente e non devono entrare in memoria.
+        let facts = clean_facts("La regex in Rust si scrive con la crate regex\nL'utente usa Rust");
+        assert_eq!(facts, vec!["L'utente usa Rust"]);
+    }
+
+    #[test]
+    fn memory_is_described_once_and_in_one_verse_only() {
+        let forgetful = system_prompt(&AiConfig { memory: false, ..AiConfig::default() }, None, false);
+        assert!(forgetful.contains("Ricordi solo la chat corrente"));
+        assert!(!forgetful.contains("QUELLO CHE SAI GIA'"));
     }
 
     #[test]

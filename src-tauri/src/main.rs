@@ -4,6 +4,7 @@
 mod ai;
 mod assistant;
 mod attachments;
+mod memory;
 mod server;
 mod storage;
 mod tools;
@@ -135,6 +136,24 @@ async fn talk(
     )
     .await?;
 
+    // Cosa c'era da ricordare si decide dopo, in un compito a parte: la
+    // risposta e' gia' a schermo e l'utente non deve aspettare una seconda
+    // chiamata al modello. Se fallisce, si e' persa una nota, non un turno.
+    if config.memory && !reply.stopped && !reply.text.trim().is_empty() {
+        let question = message.clone();
+        let answer = reply.text.clone();
+        let cfg = config.clone();
+        let chat = chat_id.clone();
+        tauri::async_runtime::spawn(async move {
+            let facts = assistant::learn(&question, &answer, &cfg).await;
+            if !facts.is_empty() {
+                if let Err(e) = memory::remember(&facts, &chat) {
+                    eprintln!("[logica] memoria non salvata: {e}");
+                }
+            }
+        });
+    }
+
     Ok(TalkReply {
         text: reply.text,
         stopped: reply.stopped,
@@ -142,6 +161,24 @@ async fn talk(
         sources: reply.sources,
         tools: reply.tools_used,
     })
+}
+
+/* --------------------------------- memoria -------------------------------- */
+
+/// Quello che l'assistente si ricorda dell'utente fra una chat e l'altra.
+#[tauri::command]
+fn get_memory() -> Vec<memory::Fact> {
+    memory::list()
+}
+
+#[tauri::command]
+fn forget_fact(fact_id: String) -> Result<(), String> {
+    memory::forget(&fact_id)
+}
+
+#[tauri::command]
+fn clear_memory() -> Result<(), String> {
+    memory::clear()
 }
 
 /// "Interrompi": il testo gia' scritto resta nella chat.
@@ -371,6 +408,9 @@ fn main() {
             get_config,
             set_config,
             check_ai_status,
+            get_memory,
+            forget_fact,
+            clear_memory,
             server_status,
             server_start,
             server_stop,

@@ -115,6 +115,16 @@ export interface AssistantStatus {
   text: string;
 }
 
+/** Una cosa che l'assistente ha imparato sull'utente e si porta dietro fra
+ *  una chat e l'altra. */
+export interface Fact {
+  id: string;
+  text: string;
+  created: string;
+  /** La conversazione da cui viene. */
+  chat_id: string;
+}
+
 /* ------------------------------ configurazione ----------------------------- */
 
 export interface Preferences {
@@ -127,6 +137,8 @@ export interface Preferences {
   /** L'assistente puo' elencare, leggere e cercare dentro le cartelle
    *  autorizzate. Spento finche' non lo si accende. */
   file_tools: boolean;
+  /** L'assistente ricorda fra una chat e l'altra quello che ha imparato. */
+  memory: boolean;
 }
 
 export interface Config {
@@ -144,6 +156,7 @@ export interface AiConfig {
   user_preferences: string;
   web_search: boolean;
   file_tools: boolean;
+  memory: boolean;
 }
 
 export interface AiStatus {
@@ -165,6 +178,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   ollama_model: "llama3.1:8b",
   web_search: true,
   file_tools: false,
+  memory: true,
 };
 
 export const DEFAULT_CONFIG: Config = {
@@ -172,6 +186,10 @@ export const DEFAULT_CONFIG: Config = {
   profile: "custom",
   user_preferences: "",
 };
+
+/** Quanti fatti tiene la memoria. Deve restare allineata a `MAX_FACTS` in
+ *  `src-tauri/src/memory.rs`. */
+export const MAX_FACTS = 60;
 
 /** Lunghezza minima della password per l'accesso da browser. Deve restare
  *  allineata a `MIN_PASSWORD_LEN` in `src-tauri/src/server/auth.rs`. */

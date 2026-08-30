@@ -38,6 +38,14 @@ pub struct AiConfig {
     /// modello la possibilita' di leggere i propri file.
     #[serde(default)]
     pub file_tools: bool,
+    /// L'assistente si porta dietro fra una chat e l'altra i fatti che ha
+    /// imparato sull'utente.
+    #[serde(default = "default_memory")]
+    pub memory: bool,
+}
+
+fn default_memory() -> bool {
+    true
 }
 
 fn default_web_search() -> bool {
@@ -61,6 +69,7 @@ impl Default for AiConfig {
             user_preferences: String::new(),
             web_search: default_web_search(),
             file_tools: false,
+            memory: default_memory(),
         }
     }
 }

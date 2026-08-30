@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
-import { isDesktop } from "../api";
+import { call, isDesktop } from "../api";
 import RemoteAccessPanel from "./RemoteAccessPanel";
-import type { AiStatus, Config, Preferences, Toast } from "../types";
+import { MAX_FACTS, type AiStatus, type Config, type Fact, type Preferences, type Toast } from "../types";
 
 interface Props {
   preferences: Preferences;
@@ -34,8 +34,37 @@ export default function SettingsModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // `null` = non ancora caricata, cosi' "non ricorda niente" non lampeggia
+  // prima che la risposta arrivi.
+  const [facts, setFacts] = useState<Fact[] | null>(null);
+
+  useEffect(() => {
+    call<Fact[]>("get_memory")
+      .then(setFacts)
+      .catch(() => setFacts([]));
+  }, []);
+
   const claudeReady = status?.claude ?? false;
   const ollamaReady = status?.ollama ?? false;
+
+  async function forget(id: string) {
+    try {
+      await call("forget_fact", { factId: id });
+      setFacts((current) => (current ?? []).filter((f) => f.id !== id));
+    } catch (e) {
+      onNotice("error", String(e));
+    }
+  }
+
+  async function forgetAll() {
+    try {
+      await call("clear_memory");
+      setFacts([]);
+      onNotice("success", "Memoria svuotata.");
+    } catch (e) {
+      onNotice("error", String(e));
+    }
+  }
 
   /// Il dialogo di sistema e' l'unico modo per autorizzare una cartella: un
   /// percorso scritto a mano nel browser aggirerebbe il senso del recinto.
@@ -146,6 +175,47 @@ export default function SettingsModal({
             scrivi tu vengono aperti comunque, anche con l'interruttore spento.
             {!isDesktop && " Si cambia solo dal PC."}
           </p>
+        </section>
+
+        <section>
+          <h3>Memoria</h3>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={prefs.memory}
+              onChange={(e) => setPrefs((p) => ({ ...p, memory: e.target.checked }))}
+            />
+            <span>Ricorda fra una conversazione e l'altra</span>
+          </label>
+          <p className="note">
+            Alla fine di ogni scambio Logica si annota i fatti che varrà la pena sapere anche fra un
+            mese — chi sei, cosa usi, come vuoi le risposte — e li rimette nel prompt delle chat
+            successive. Non l'intera conversazione: {MAX_FACTS} righe al massimo, tutte qui sotto,
+            tutte cancellabili. Spegnendo l'interruttore smette di annotare e di leggere; quello che
+            c'è resta finché non lo cancelli.
+          </p>
+
+          {facts === null ? (
+            <p className="note">Caricamento…</p>
+          ) : facts.length === 0 ? (
+            <p className="note">Non ha ancora imparato niente.</p>
+          ) : (
+            <>
+              <ul className="fact-list">
+                {facts.map((fact) => (
+                  <li key={fact.id}>
+                    <span>{fact.text}</span>
+                    <button className="tool-btn" onClick={() => void forget(fact.id)}>
+                      Dimentica
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <button className="tool-btn" onClick={() => void forgetAll()}>
+                Dimentica tutto
+              </button>
+            </>
+          )}
         </section>
 
         <section>

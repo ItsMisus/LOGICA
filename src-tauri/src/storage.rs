@@ -91,6 +91,10 @@ pub struct Preferences {
     /// file dell'utente.
     #[serde(default)]
     pub file_tools: bool,
+    /// L'assistente ricorda fra una chat e l'altra. Acceso: quello che tiene
+    /// e' visibile e cancellabile dalle impostazioni.
+    #[serde(default = "enabled")]
+    pub memory: bool,
 }
 
 fn enabled() -> bool {
@@ -106,6 +110,7 @@ impl Default for Preferences {
             ollama_model: "llama3.1:8b".to_string(),
             web_search: true,
             file_tools: false,
+            memory: true,
         }
     }
 }

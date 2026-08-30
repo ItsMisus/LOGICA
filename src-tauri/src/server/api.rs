@@ -350,6 +350,12 @@ struct PreferencesArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct FactArgs {
+    fact_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ConfigArgs {
     config: Config,
 }
@@ -437,6 +443,13 @@ async fn command(
             Ok(a) => result(crate::export_chat(a.chat_id, a.format)),
             Err(e) => e,
         },
+
+        "get_memory" => ok(json!(crate::get_memory())),
+        "forget_fact" => match parse::<FactArgs>(body) {
+            Ok(a) => result(crate::forget_fact(a.fact_id)),
+            Err(e) => e,
+        },
+        "clear_memory" => result(crate::clear_memory()),
 
         "get_preferences" => ok(json!(crate::get_preferences())),
         "set_preferences" => match parse::<PreferencesArgs>(body) {

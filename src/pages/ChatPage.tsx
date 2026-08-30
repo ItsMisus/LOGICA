@@ -228,6 +228,7 @@ export default function ChatPage() {
       user_preferences: config.user_preferences,
       web_search: preferences.web_search,
       file_tools: preferences.file_tools,
+      memory: preferences.memory,
     }),
     [preferences, config.user_preferences],
   );

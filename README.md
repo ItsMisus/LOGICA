@@ -79,7 +79,8 @@ Il modello usato è `claude-opus-5`. Senza chiave l'app resta su Ollama.
   viene lasciato indietro: per tenere anche la strada vecchia si duplica prima la conversazione
   (menu `⋯` nella barra laterale).
 - **Storico**: al modello vanno gli ultimi 30 turni della chat corrente, più le istruzioni
-  personalizzate scritte nelle impostazioni e la data di oggi.
+  personalizzate scritte nelle impostazioni, la data di oggi e quello che ha imparato nelle altre
+  conversazioni (vedi *Memoria*).
 - **Titolo**: dopo il primo scambio è il modello stesso a proporlo; se non ne esce niente di
   sensato resta la prima frase dell'utente.
 - **Markdown**: titoli, elenchi, citazioni, tabelle, codice con pulsante *Copia*. Il parser è in
@@ -149,6 +150,32 @@ escono solo se accendi gli strumenti sui file *e* usi la Claude API). Gli
 indirizzi locali e di rete interna (`localhost`, `192.168.*`, `*.local`, `169.254.169.254`) sono
 rifiutati, anche dopo un redirect: il modello non può usare l'app per bussare ai servizi di casa.
 
+### Memoria
+
+Fino a qui ogni chat nuova ripartiva da zero: l'assistente si ripresentava e ti chiedeva di nuovo
+quello che gli avevi già detto. Ora, **dopo** che la risposta è a schermo, parte un secondo compito
+che legge lo scambio e si annota solo quello che varrà la pena sapere anche fra un mese: come ti
+chiami, cosa usi, a cosa stai lavorando, come vuoi le risposte. Gira in background: l'attesa della
+risposta non cambia di un secondo.
+
+I fatti stanno in `~/.logica/memory.json`, uno per riga, e finiscono nel prompt di sistema di tutte
+le chat successive. Con i freni:
+
+- **3 fatti** al massimo da uno scambio, **60** in tutto; oltre, i più vecchi escono. Una memoria
+  che cresce senza limite si mangia la finestra di contesto che serve alla domanda.
+- Una riga più lunga di 200 caratteri non è un fatto, è un riassunto: viene scartata.
+- Un fatto che c'è già non entra due volte. «L'utente usa Rust» e «L'utente usa Rust al lavoro» sono
+  lo stesso fatto: senza questo controllo la memoria si riempirebbe di varianti della stessa riga.
+- L'estrattore deve parlare *dell'utente*: una riga che riassume la risposta («la regex in Rust si
+  scrive…») viene buttata prima di arrivare al file.
+
+In **Impostazioni → Memoria** c'è l'interruttore (acceso di default), l'elenco completo di quello
+che sa e un pulsante *Dimentica* per riga. Spento, smette sia di annotare sia di leggere; quello che
+ha già imparato resta finché non lo cancelli.
+
+Nel prompt la memoria e «ricordi solo questa chat» sono alternative, mai insieme: due istruzioni
+opposte nello stesso prompt fanno scegliere a caso un modello piccolo.
+
 ### Accesso ai file
 
 Di default l'assistente non vede niente del disco e lo dice. In **Impostazioni → File** si
@@ -187,7 +214,8 @@ sola la lettura dei file.
 ```
 ~/.logica/
 ├── config.json              istruzioni personalizzate, cartelle raggiungibili dal browser
-├── preferences.json         tema, motore AI, URL e modello Ollama, ricerca su internet, accesso ai file
+├── preferences.json         tema, motore AI, URL e modello Ollama, ricerca su internet, accesso ai file, memoria
+├── memory.json              i fatti imparati sull'utente, uno per riga
 └── chats/
     └── chat_20260829_142530_a1b2.json
 ```
@@ -287,6 +315,7 @@ file-organizer-ai/
     ├── web.rs                   ricerca (DuckDuckGo, Bing), pagine, HTML → testo
     ├── attachments.rs           allegati: testo, PDF, DOCX, immagini in base64
     ├── tools.rs                 strumenti sui file: elenca, legge, cerca (sola lettura)
+    ├── memory.rs                i fatti che l'assistente si porta fra una chat e l'altra
     ├── ai.rs                    configurazione del motore AI e stato della connessione
     └── storage.rs               ~/.logica: chat, ricerca, esportazione, preferenze
 ```
@@ -307,6 +336,7 @@ file-organizer-ai/
 | `save_export` | `path`, `content` | `—` (solo desktop: non ha una rotta sul server) |
 | `get_preferences` / `set_preferences` | — / `preferences` | `Preferences` / `—` |
 | `get_config` / `set_config` | — / `config` | `Config` / `—` |
+| `get_memory` / `forget_fact` / `clear_memory` | — / `factId` / — | `Fact[]` / `—` / `—` |
 | `check_ai_status` | `ollamaUrl` | `{ ollama, claude, models }` |
 
 Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta, e
@@ -316,7 +346,7 @@ Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta
 
 ```bash
 cd src-tauri
-cargo test                                   # 71 test offline
+cargo test                                   # 78 test offline
 cargo test -- --ignored live_ollama_stream   # streaming vero contro Ollama
 cargo test -- --ignored live_search          # ricerca vera (DuckDuckGo/Bing)
 cargo test -- --ignored live_research        # ricerca + lettura delle pagine
