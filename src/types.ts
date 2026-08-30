@@ -62,6 +62,49 @@ export interface ChatMessage {
   sources?: WebSource[];
   /** Cartelle e file guardati sul disco per scrivere questa risposta. */
   tools?: ToolUse[];
+  /** Le risposte alternative alla stessa domanda, quella attiva compresa. */
+  variants?: MessageVariant[];
+  /** Quale alternativa si sta guardando, da 0. */
+  variant?: number;
+}
+
+/** Una delle risposte date alla stessa domanda. */
+export interface MessageVariant {
+  content: string;
+  timestamp: string;
+  sources?: WebSource[];
+  tools?: ToolUse[];
+}
+
+/**
+ * Il messaggio con l'alternativa `index` in primo piano.
+ *
+ * `content`, `sources` e `tools` restano una copia dell'alternativa attiva:
+ * così il file della chat si legge anche senza sapere niente dei rami, e chi
+ * lo apre vede una conversazione normale.
+ */
+export function withVariant(m: ChatMessage, index: number): ChatMessage {
+  const chosen = m.variants?.[index];
+  if (!chosen) return m;
+  return {
+    ...m,
+    content: chosen.content,
+    sources: chosen.sources,
+    tools: chosen.tools,
+    timestamp: chosen.timestamp,
+    variant: index,
+  };
+}
+
+/** Aggiunge una risposta alle alternative di `m` e la mette in primo piano. */
+export function addVariant(m: ChatMessage, added: MessageVariant): ChatMessage {
+  // Un messaggio scritto prima che esistessero i rami non ha `variants`: la
+  // sua risposta e' la prima alternativa.
+  const existing = m.variants ?? [
+    { content: m.content, timestamp: m.timestamp, sources: m.sources, tools: m.tools },
+  ];
+  const variants = [...existing, added];
+  return { ...withVariant({ ...m, variants }, variants.length - 1) };
 }
 
 export interface ChatMetadata {

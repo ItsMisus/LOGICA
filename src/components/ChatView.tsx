@@ -28,6 +28,8 @@ interface Props {
   onRegenerate: () => void;
   /** Riscrive un messaggio dell'utente e riparte da li'. */
   onEdit: (messageId: string, text: string) => void;
+  /** Passa a un'altra risposta fra quelle date alla stessa domanda. */
+  onPickVariant: (messageId: string, index: number) => void;
   /** Errori dei componenti figli (dialogo allegati) mostrati come notifica. */
   onError: (message: string) => void;
 }
@@ -68,6 +70,7 @@ export default function ChatView({
   onStop,
   onRegenerate,
   onEdit,
+  onPickVariant,
   onError,
 }: Props) {
   const scroller = useRef<HTMLDivElement | null>(null);
@@ -152,6 +155,7 @@ export default function ChatView({
                   onRegenerate={onRegenerate}
                   canEdit={!streaming && message.role === "user"}
                   onEdit={(text) => onEdit(message.id, text)}
+                  onPickVariant={(index) => onPickVariant(message.id, index)}
                 />
               ))}
 

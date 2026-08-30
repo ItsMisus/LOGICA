@@ -38,6 +38,26 @@ pub struct ChatMessage {
     /// Cartelle e file guardati sul disco per scrivere questa risposta.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<crate::tools::ToolUse>>,
+    /// Le risposte alternative a questa stessa domanda, quando si e'
+    /// rigenerato. Comprende quella attiva: `content` qui sopra ne e' una
+    /// copia, cosi' chi legge il file senza sapere niente dei rami vede
+    /// comunque la conversazione giusta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variants: Option<Vec<Variant>>,
+    /// Quale alternativa e' quella attiva, da 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<usize>,
+}
+
+/// Una delle risposte date alla stessa domanda.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Variant {
+    pub content: String,
+    pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<Vec<crate::web::SearchHit>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<crate::tools::ToolUse>>,
 }
 
 fn default_message_type() -> String {
@@ -546,6 +566,8 @@ pub(crate) mod tests {
                 attachments: None,
                 sources: None,
                 tools: None,
+                variants: None,
+                variant: None,
             }],
         }
     }
@@ -603,6 +625,8 @@ pub(crate) mod tests {
                 attachments: None,
                 sources: None,
                 tools: None,
+                variants: None,
+                variant: None,
             })
             .collect();
         chat

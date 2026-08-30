@@ -1557,6 +1557,20 @@ button {
   color: var(--faint);
 }
 
+/* Frecce fra le risposte date alla stessa domanda: < 2/3 > */
+.variants {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 4px;
+}
+
+.variants-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
 /* Palette dei comandi (Ctrl+K). Sta in alto e non al centro: cosi' non
    salta quando la lista si accorcia mentre si scrive. */
 .palette {

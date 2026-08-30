@@ -14,6 +14,8 @@ interface Props {
   canEdit?: boolean;
   /** Manda di nuovo questo turno con il testo cambiato. */
   onEdit?: (text: string) => void;
+  /** Passa a un'altra risposta fra quelle date alla stessa domanda. */
+  onPickVariant?: (index: number) => void;
 }
 
 /** Coda del tooltip di un allegato: da dove viene il testo che ha letto il
@@ -61,6 +63,7 @@ export default function Message({
   onRegenerate,
   canEdit,
   onEdit,
+  onPickVariant,
 }: Props) {
   const [copied, setCopied] = useState(false);
   /** Testo in riscrittura: `null` quando il messaggio si sta solo leggendo. */
@@ -173,6 +176,12 @@ export default function Message({
     );
   }
 
+  // Quante risposte sono state date a questa domanda, e quale si sta
+  // guardando. Un messaggio senza rami ne ha una sola e le frecce non
+  // compaiono.
+  const variants = message.variants?.length ?? 1;
+  const current = message.variant ?? 0;
+
   return (
     <div className="turn assistant">
       <div className="assistant-body">
@@ -216,6 +225,27 @@ export default function Message({
 
       {!streaming && (
         <div className="turn-actions">
+          {variants > 1 && onPickVariant && (
+            <span className="variants" title="Risposte date alla stessa domanda">
+              <button
+                className="tool-btn"
+                aria-label="Risposta precedente"
+                onClick={() => onPickVariant((current - 1 + variants) % variants)}
+              >
+                ‹
+              </button>
+              <span className="variants-count">
+                {current + 1}/{variants}
+              </span>
+              <button
+                className="tool-btn"
+                aria-label="Risposta successiva"
+                onClick={() => onPickVariant((current + 1) % variants)}
+              >
+                ›
+              </button>
+            </span>
+          )}
           <button className="tool-btn" onClick={() => void copy()}>
             {copied ? "Copiato" : "Copia"}
           </button>

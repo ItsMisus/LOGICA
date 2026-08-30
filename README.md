@@ -74,7 +74,11 @@ Il modello usato è `claude-opus-5`. Senza chiave l'app resta su Ollama.
 - **Streaming**: il backend legge la risposta riga per riga (NDJSON per Ollama, SSE per Claude) e
   la rilancia al frontend come eventi `assistant-delta`; il testo compare mentre viene generato.
 - **Interrompi**: il pulsante quadrato ferma la generazione e **tiene** il testo già arrivato.
-- **Rigenera**: rimanda l'ultima domanda senza l'ultima risposta.
+- **Rigenera**: rimanda l'ultima domanda. La risposta vecchia non si butta: diventa la prima di due
+  alternative, e sotto la risposta compaiono le frecce `‹ 2/3 ›` per passare dall'una all'altra.
+  Ogni alternativa si porta dietro le sue fonti e i suoi strumenti. Nel file della chat `content`
+  resta una copia di quella attiva, così la conversazione si legge anche senza sapere niente dei
+  rami.
 - **Modifica**: qualsiasi messaggio dell'utente si riscrive e riparte da lì. Quello che veniva dopo
   viene lasciato indietro: per tenere anche la strada vecchia si duplica prima la conversazione
   (menu `⋯` nella barra laterale).
@@ -493,7 +497,7 @@ Eventi: `assistant-delta` (`{ chat_id, text }`), un pezzo di risposta alla volta
 ## Test
 
 ```bash
-npm run check                                # tipi + 16 test del frontend
+npm run check                                # tipi + 25 test del frontend
 
 cd src-tauri
 cargo test                                   # 94 test offline

@@ -24,6 +24,8 @@ import {
   type ChatMatch,
   type ChatMessage,
   type ChatMetadata,
+  addVariant,
+  withVariant,
   type ChatTurn,
   type Config,
   type ExportFormat,
@@ -251,14 +253,24 @@ export default function ChatPage() {
    * funzione serve sia per un messaggio nuovo sia per "Rigenera".
    */
   const run = useCallback(
-    async (text: string, history: ChatMessage[], attachments: Attachment[] = []) => {
+    async (
+      text: string,
+      history: ChatMessage[],
+      attachments: Attachment[] = [],
+      // Rigenerando, la risposta nuova non sostituisce quella vecchia: si
+      // affianca come alternativa di questo messaggio, e si naviga con le
+      // frecce. Se manca, la risposta si aggiunge in fondo come sempre.
+      variantOf?: ChatMessage,
+    ) => {
       const turns: ChatTurn[] = history
         .filter((m) => m.type === "text")
         .map((m) => ({ role: m.role, content: promptContent(m) }));
 
       const userMessage = message("user", text);
       if (attachments.length > 0) userMessage.attachments = attachments;
-      const withUser = [...history, userMessage];
+      // Rigenerando, la domanda e' gia' in fondo allo storico: non se ne
+      // aggiunge una uguale.
+      const withUser = variantOf ? [...history, userMessage, variantOf] : [...history, userMessage];
       setMessages(withUser);
       setStreamingText(null);
       setStatusText(null);
@@ -289,7 +301,22 @@ export default function ChatPage() {
         if (sources.length > 0) aiMessage.sources = sources;
         const used: ToolUse[] = reply.tools ?? [];
         if (used.length > 0) aiMessage.tools = used;
-        const finalMessages = answer.length > 0 ? [...withUser, aiMessage] : withUser;
+
+        let finalMessages = withUser;
+        if (answer.length > 0) {
+          finalMessages = variantOf
+            ? [
+                ...history,
+                userMessage,
+                addVariant(variantOf, {
+                  content: answer,
+                  timestamp: aiMessage.timestamp,
+                  sources: sources.length > 0 ? sources : undefined,
+                  tools: used.length > 0 ? used : undefined,
+                }),
+              ]
+            : [...withUser, aiMessage];
+        }
         // Il testo in streaming sparisce nello stesso momento in cui compare il
         // messaggio finito, altrimenti si vede due volte.
         setStreamingText(null);
@@ -376,12 +403,31 @@ export default function ChatPage() {
   }, []);
 
   /** Rigenera: si toglie l'ultima risposta e si rimanda l'ultima domanda. */
+  /**
+   * Rigenera l'ultima risposta. La vecchia non si butta: diventa la prima di
+   * due alternative, e sotto la risposta compaiono le frecce per passare da
+   * una all'altra.
+   */
   const regenerate = useCallback(() => {
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     if (!lastUser) return;
     const index = messages.indexOf(lastUser);
-    void run(lastUser.content, messages.slice(0, index), lastUser.attachments ?? []);
+    const previous = messages[index + 1];
+    const answered = previous?.role === "ai" && previous.type === "text" ? previous : undefined;
+    void run(lastUser.content, messages.slice(0, index), lastUser.attachments ?? [], answered);
   }, [messages, run]);
+
+  /** Passa da un'alternativa all'altra di una risposta rigenerata. */
+  const pickVariant = useCallback(
+    (messageId: string, index: number) => {
+      setMessages((current) => {
+        const next = current.map((m) => (m.id === messageId ? withVariant(m, index) : m));
+        void persist(next);
+        return next;
+      });
+    },
+    [persist],
+  );
 
   /**
    * Riscrive un messaggio gia' mandato e riparte da li'. Quello che veniva
@@ -716,6 +762,7 @@ export default function ChatPage() {
         onStop={stop}
         onRegenerate={regenerate}
         onEdit={editMessage}
+        onPickVariant={pickVariant}
         onError={(text) => toast("error", text)}
       />
 
