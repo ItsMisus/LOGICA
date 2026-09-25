@@ -229,6 +229,20 @@ fn write_doc(root: &Path, relative: &str, body: &str) -> std::io::Result<()> {
     std::fs::write(file, body)
 }
 
+/// I nomi dei file che esistono davvero, in minuscolo e senza cartelle.
+///
+/// Serve a smascherare i nomi inventati: un modello che cita
+/// `bolletta_luce.txt` sta citando un file che non e' mai stato scritto, e
+/// senza questo elenco quella bugia passava perche' nessuno l'aveva prevista
+/// caso per caso.
+pub fn known_names() -> Vec<String> {
+    DOCS.iter()
+        .chain(std::iter::once(&ATTACHMENT))
+        .filter_map(|doc| doc.path.rsplit(['/', '\\']).next())
+        .map(|name| name.to_lowercase())
+        .collect()
+}
+
 pub fn clean() {
     let _ = std::fs::remove_dir_all(corpus_dir());
     if let Some(parent) = attachment_path().parent() {

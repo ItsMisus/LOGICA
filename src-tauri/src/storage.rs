@@ -135,7 +135,7 @@ impl Default for Preferences {
             theme: "dark".to_string(),
             use_premium_ai: false,
             ollama_url: DEFAULT_OLLAMA_URL.to_string(),
-            ollama_model: "llama3.1:8b".to_string(),
+            ollama_model: "qwen3:14b".to_string(),
             web_search: true,
             file_tools: false,
             memory: true,

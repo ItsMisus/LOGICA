@@ -42,12 +42,19 @@ winget install --id Rustlang.Rustup -e
 rustup default stable
 
 winget install --id Ollama.Ollama -e
-ollama pull llama3.1:8b    # modello di default
+ollama pull qwen3:14b    # modello di default
 ```
 
 Verifica Ollama: `curl http://localhost:11434/api/tags` deve rispondere JSON. Il modello si cambia
-da **Impostazioni**, che elenca quelli installati. `llama3.1:8b` è il default; `mistral` (7B) è il
-minimo sindacale, `qwen2.5:14b` ragiona meglio se la GPU regge.
+da **Impostazioni**, che elenca quelli installati.
+
+`qwen3:14b` è il default. La scelta viene dalla misura delle cento richieste, non da un'impressione:
+fa 86/100 con una mediana di 12,5 secondi, e occupa 9,3 GB, quindi sta dentro i 12 GB di VRAM di una
+scheda di fascia media senza traboccare nella memoria di sistema. `llama3.1:8b` fa 61/100 in 1,9
+secondi: è sei volte più rapido, e resta la scelta giusta su una macchina che non regge il 14B, ma
+sulle richieste ambigue va 0 su 5 e non chiede mai un chiarimento. Chi ha molta VRAM può salire
+ancora, ma un modello che non entra tutto nella scheda perde molto più tempo di quanto ne guadagni
+in qualità: `qwen3:30b-a3b` arriva a 94/100 e a 18,6 secondi di mediana, e sui 12 GB non ci sta.
 
 ## Avvio
 
@@ -307,10 +314,18 @@ l'interruttore: da quel momento il modello ha quattro strumenti, tutti in **sola
 | `find_files` | cerca per pezzo di nome, nelle sottocartelle | 40 risultati, 6 livelli, 4.000 file visitati |
 | `search_in_files` | cerca un testo dentro i file, riga per riga | 40 righe, file oltre 2 MB e binari saltati |
 
-Serve un modello che sappia usare gli strumenti, e che sia abbastanza forte da concatenarli: nelle
-prove `qwen3:30b-a3b` fa il giro giusto (`find_files` per trovare il file, `read_file` per aprirlo,
-poi risponde), mentre `llama3.1:8b` si ferma dopo la prima chiamata e completa a memoria. Con Claude
-non è un problema.
+Serve un modello che sappia usare gli strumenti, e che sia abbastanza forte da concatenarli:
+`find_files` per trovare il file, `read_file` per aprirlo, poi la risposta. `qwen3:14b` fa il giro
+intero; i modelli più piccoli si fermano dopo la prima chiamata e completano a memoria — cioè
+inventano il contenuto del file invece di leggerlo, che è il modo peggiore di sbagliare, perché la
+risposta sembra buona.
+
+Un modello piccolo sbaglia anche in un altro modo, e l'app se ne difende: invece di mandare la
+chiamata nel campo apposta la **scrive nel testo della risposta**, come `{"name": "read_file",
+"parameters": {...}}`. Nella misura `llama3.1:8b` l'ha fatto diciotto volte su cento. L'app riconosce
+questa forma e la esegue invece di stamparla; se il modello si è inventato uno strumento che non
+esiste — `math` per fare una moltiplicazione — rifà il giro senza strumenti chiedendogli di
+rispondere da solo.
 
 Due riparazioni che sembrano dettagli e non lo sono. I modelli locali su Windows **raddoppiano le
 barre rovesciate** (`C:\Users\...`), e senza stringerle ogni lettura finisce su un percorso che
@@ -559,7 +574,7 @@ corretto, lingua, risposte inventate, tempo, fallimenti, e le stesse cose su un 
 
 ```bash
 cargo test -- --ignored eval_run --nocapture
-FOAI_EVAL_MODELS=qwen3:30b-a3b,llama3.1:8b cargo test -- --ignored eval_run --nocapture
+FOAI_EVAL_MODELS=qwen3:14b,llama3.1:8b cargo test -- --ignored eval_run --nocapture
 FOAI_EVAL_CATEGORIES=documenti,file cargo test -- --ignored eval_run --nocapture
 FOAI_EVAL_FRESH=1 cargo test -- --ignored eval_run --nocapture   # ricomincia da zero
 ```

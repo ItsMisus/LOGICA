@@ -46,13 +46,18 @@
 //!
 //! ```text
 //! cargo test -- --ignored eval_run --nocapture
-//! FOAI_EVAL_MODELS=qwen3:30b-a3b,llama3.1:8b cargo test -- --ignored eval_run --nocapture
+//! FOAI_EVAL_MODELS=llama3.1:8b,qwen3:14b cargo test -- --ignored eval_run --nocapture
 //! FOAI_EVAL_CATEGORIES=documenti,file cargo test -- --ignored eval_run --nocapture
 //! ```
 //!
 //! Cento richieste contro un modello da 30 miliardi di parametri durano piu' di
 //! un'ora. Il filtro per categoria serve a rifare una parte sola dopo una
 //! modifica, senza ripagare tutto il conto.
+//!
+//! Il giornale sta sempre nello stesso file, e si puo' spostare:
+//! `FOAI_EVAL_JOURNAL=C:\misure\vaglio.jsonl`. Una misura fatta dopo una
+//! modifica al programma va in un giornale suo, o si mescola a quella di prima
+//! e non si puo' piu' dire quale numero apparteneva a quale versione.
 //!
 //! Ogni esito viene scritto su disco appena arriva, e un lavoro interrotto
 //! riprende da dove era rimasto invece di ricominciare. La prima esecuzione
@@ -222,7 +227,14 @@ fn prepare(models: &[String]) -> Result<(), String> {
 fn wanted_models() -> Vec<String> {
     std::env::var("FOAI_EVAL_MODELS")
         .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
-        .unwrap_or_else(|_| vec!["qwen3:30b-a3b".to_string(), "llama3.1:8b".to_string()])
+        // Prima il modello che gira davvero sul computer di chi usa il
+        // programma: se la misura viene interrotta a meta', quello che resta
+        // sul disco deve essere il numero che conta. `qwen3:14b` sta dopo, come
+        // metro di paragone: e' il piu' grande che entra tutto nella memoria di
+        // una scheda video da 12 GB, quindi e' un paragone che si puo' davvero
+        // proporre a chi usa il programma. `qwen3:30b-a3b` stava qui prima, ma
+        // 18,6 GB non ci entrano e la mediana era di 18,6 secondi a risposta.
+        .unwrap_or_else(|_| vec!["llama3.1:8b".to_string(), "qwen3:14b".to_string()])
 }
 
 fn wanted_cases() -> Vec<&'static Case> {

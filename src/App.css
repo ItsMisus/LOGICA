@@ -15,12 +15,19 @@
   --bubble: #1c1a19;
   --border: #232120;
   --border-strong: #35312f;
+  /* Contorno del riquadro di scrittura: 3:1 sul fondo, la soglia che WCAG
+     1.4.11 chiede ai bordi dei componenti. */
+  --border-loud: #6a625d;
   --text: #ece9e4;
-  --muted: #8f8983;
-  --faint: #5f5a55;
+  --muted: #b3aca4;
+  --faint: #9a938b;
 
   --accent: #631122;
   --accent-hover: #7d1a2c;
+  /* Bordeaux acceso: serve dove l'accento deve reggersi da solo (tasto di
+     invio, icone della barra laterale). #631122 sul nero sta sotto 1.5:1. */
+  --accent-bright: #c22740;
+  --accent-bright-hover: #d93450;
   --accent-text: #f6eceb;
   --accent-soft: rgba(99, 17, 34, 0.18);
   --ok: #5f8a52;
@@ -48,12 +55,15 @@
   --bubble: #eceae3;
   --border: #e0ddd4;
   --border-strong: #c9c5b9;
+  --border-loud: #a09a8e;
   --text: #171615;
   --muted: #6b6660;
-  --faint: #948f88;
+  --faint: #67625b;
 
   --accent: #631122;
   --accent-hover: #7d1a2c;
+  --accent-bright: #8e1a30;
+  --accent-bright-hover: #a52239;
   --accent-text: #ffffff;
   --accent-soft: rgba(99, 17, 34, 0.09);
   --error: #a33a2c;
@@ -82,6 +92,7 @@ body {
   color: var(--text);
   font-family: var(--font-sans);
   font-size: 15px;
+  font-weight: 400;
   line-height: 1.62;
   -webkit-font-smoothing: antialiased;
 }
@@ -164,7 +175,7 @@ button {
   flex: none;
   width: 14px;
   height: 14px;
-  background: var(--accent);
+  background: var(--accent-bright);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
 }
 
@@ -197,7 +208,7 @@ button {
 }
 
 .new-chat .plus {
-  color: var(--accent);
+  color: var(--accent-bright);
   font-size: 15px;
   line-height: 1;
 }
@@ -206,7 +217,7 @@ button {
   margin-left: auto;
   font-family: var(--font-mono);
   font-size: 11px;
-  font-weight: 400;
+  font-weight: 500;
   letter-spacing: 0.02em;
   color: var(--faint);
 }
@@ -227,7 +238,7 @@ button {
 
 .search-box .glass {
   flex: none;
-  color: var(--faint);
+  color: var(--accent-bright);
   font-size: 12px;
   line-height: 1;
 }
@@ -239,6 +250,7 @@ button {
   background: none;
   outline: none;
   font-size: 13px;
+  font-weight: 500;
 }
 
 .search::placeholder {
@@ -281,7 +293,7 @@ button {
 
 .chat-item.active {
   background: var(--surface);
-  border-left-color: var(--accent);
+  border-left-color: var(--accent-bright);
 }
 
 /* Quadratino di stato: bordeaux sulla conversazione aperta. */
@@ -293,7 +305,7 @@ button {
 }
 
 .chat-item.active .chat-item-dot {
-  background: var(--accent);
+  background: var(--accent-bright);
 }
 
 .chat-item-main {
@@ -302,6 +314,7 @@ button {
   padding: 8px 0;
   text-align: left;
   font-size: 13.5px;
+  font-weight: 500;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
@@ -317,6 +330,7 @@ button {
   flex: none;
   font-family: var(--font-mono);
   font-size: 11px;
+  font-weight: 500;
   color: var(--faint);
 }
 
@@ -363,6 +377,7 @@ button {
 .chat-item-snippet {
   margin: 0 0 8px 13px;
   font-size: 11.5px;
+  font-weight: 500;
   line-height: 1.45;
   color: var(--faint);
   display: -webkit-box;
@@ -383,6 +398,7 @@ button {
   padding: 7px 10px;
   text-align: left;
   font-size: 12.5px;
+  font-weight: 500;
   color: var(--muted);
 }
 
@@ -410,6 +426,7 @@ button {
 .empty-note {
   margin: 4px 16px;
   font-size: 12.5px;
+  font-weight: 500;
   color: var(--faint);
 }
 
@@ -515,13 +532,14 @@ button {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 13px 16px;
+  padding: 16px 18px;
   border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   text-align: left;
   font-size: 13.5px;
+  font-weight: 500;
   color: var(--muted);
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .starter:nth-child(2n) {
@@ -532,20 +550,27 @@ button {
   border-bottom: none;
 }
 
-.starter:hover {
-  background: var(--surface);
+/* Sono bottoni senza contorno proprio: senza uno stacco netto al passaggio
+   del mouse non si capisce che si possono premere. */
+.starter:hover,
+.starter:focus-visible {
+  background: var(--surface-2);
   color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  outline: none;
 }
 
 .starter-num {
   flex: none;
   font-family: var(--font-mono);
   font-size: 11px;
+  font-weight: 500;
   color: var(--faint);
 }
 
-.starter:hover .starter-num {
-  color: var(--accent-hover);
+.starter:hover .starter-num,
+.starter:focus-visible .starter-num {
+  color: var(--accent-bright);
 }
 
 /* ------------------------------- conversazione ---------------------------- */
@@ -890,14 +915,16 @@ button {
   padding: 0 24px 16px;
 }
 
+/* Uno scalino piu' chiaro del fondo pagina: il riquadro va letto come una
+   superficie a se', non come un buco nel nero. */
 .composer-box {
-  border: 1px solid var(--border);
-  background: var(--surface);
+  border: 1px solid var(--border-loud);
+  background: var(--surface-2);
   transition: border-color 0.12s ease;
 }
 
 .composer-box:focus-within {
-  border-color: var(--border-strong);
+  border-color: var(--accent-bright);
 }
 
 .composer-input {
@@ -915,7 +942,7 @@ button {
 }
 
 .composer-input::placeholder {
-  color: var(--muted);
+  color: var(--faint);
 }
 
 /* Allegati scelti col "+": restano sopra al testo finche' non si invia. */
@@ -987,15 +1014,23 @@ button {
   align-items: center;
   gap: 8px;
   padding: 8px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-strong);
+}
+
+/* Stessa altezza e stesso asse per tutti i comandi della riga: il "+", il
+   selettore del motore e il tasto di invio restano centrati fra loro. */
+.composer-actions > * {
+  align-self: center;
+  min-height: 28px;
 }
 
 .composer-add {
   display: grid;
   place-items: center;
+  flex: none;
   width: 28px;
   height: 28px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   color: var(--muted);
   font-size: 14px;
   line-height: 1;
@@ -1012,11 +1047,37 @@ button {
   align-items: center;
   gap: 7px;
   margin-left: auto;
-  padding: 5px 9px;
-  border: 1px solid var(--border);
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--muted);
+}
+
+/* Il menu a tendina nativo porta con se' altezza e margini propri: azzerati,
+   senno' si appoggia piu' in basso degli altri due tasti. */
+.engine-pick {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  outline: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.engine-pick:hover,
+.engine-pick:focus-visible {
+  color: var(--text);
+}
+
+.engine-pick option {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 .engine-dot {
@@ -1033,21 +1094,24 @@ button {
   background: var(--error);
 }
 
+/* Unico blocco pieno della riga: sul bordeaux scuro spariva contro il fondo,
+   quindi usa la versione accesa dell'accento, con la freccia in bianco. */
 .square-btn {
   display: grid;
   place-items: center;
   flex: none;
   width: 28px;
   height: 28px;
-  background: var(--accent);
-  color: var(--accent-text);
-  font-size: 14px;
+  background: var(--accent-bright);
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 500;
   line-height: 1;
   transition: background 0.12s ease, opacity 0.12s ease;
 }
 
 .square-btn:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--accent-bright-hover);
 }
 
 .square-btn:disabled {
@@ -1058,13 +1122,14 @@ button {
 .square-btn .square {
   width: 9px;
   height: 9px;
-  background: var(--accent-text);
+  background: #ffffff;
 }
 
 .composer-hint {
   margin: 8px 0 0;
   text-align: center;
   font-size: var(--label-size);
+  font-weight: 500;
   letter-spacing: 0.06em;
   color: var(--faint);
 }

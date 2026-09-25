@@ -13,7 +13,7 @@
 //! non c'e', e una riga scritta a meta' si butta senza toccare le altre.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::Outcome;
 
@@ -25,13 +25,34 @@ pub struct Entry {
     pub outcome: Outcome,
 }
 
+/// Il giornale della misura vera: un percorso solo, sempre lo stesso, perche'
+/// una misura ripresa domani deve ritrovare quella di oggi.
+///
+/// Proprio per questo le prove qui sotto non lo toccano: passano un percorso
+/// loro alle funzioni `_su`. Prima non era cosi', e le prove chiamavano
+/// `reset()` su questo file. Bastava far girare `cargo test` mentre una misura
+/// era in corso — o dopo — per cancellare duecento richieste gia' misurate.
+/// `TempHome` sembrava metterle al riparo ma non lo faceva: sposta `HOME`,
+/// mentre `temp_dir()` legge `TEMP`, che resta quello di sempre.
+///
+/// `FOAI_EVAL_JOURNAL` sposta il giornale altrove. Serve a rimisurare una
+/// parte dopo una modifica senza mescolarla — o peggio, senza sostituirla — a
+/// quella di prima: le due misure sono di due programmi diversi, e vanno
+/// tenute in due file diversi per poterle confrontare.
 pub fn path() -> PathBuf {
-    std::env::temp_dir().join("logica_eval_giornale.jsonl")
+    match std::env::var("FOAI_EVAL_JOURNAL") {
+        Ok(p) if !p.trim().is_empty() => PathBuf::from(p.trim()),
+        _ => std::env::temp_dir().join("logica_eval_giornale.jsonl"),
+    }
 }
 
 /// Butta via il giornale e ricomincia da capo.
 pub fn reset() {
-    let _ = std::fs::remove_file(path());
+    reset_su(&path());
+}
+
+pub fn reset_su(file: &Path) {
+    let _ = std::fs::remove_file(file);
 }
 
 /// Aggiunge un esito in fondo.
@@ -40,14 +61,18 @@ pub fn reset() {
 /// contenuto e' sul disco quando la riga e' finita, e non nella memoria di un
 /// processo che sta per essere ucciso.
 pub fn append(model: &str, outcome: &Outcome) -> Result<(), String> {
+    append_su(&path(), model, outcome)
+}
+
+pub fn append_su(file: &Path, model: &str, outcome: &Outcome) -> Result<(), String> {
     let entry = Entry { model: model.to_string(), outcome: outcome.clone() };
     let line = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
-    let mut file = std::fs::OpenOptions::new()
+    let mut aperto = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path())
+        .open(file)
         .map_err(|e| format!("giornale non apribile: {e}"))?;
-    writeln!(file, "{line}").map_err(|e| format!("giornale non scrivibile: {e}"))
+    writeln!(aperto, "{line}").map_err(|e| format!("giornale non scrivibile: {e}"))
 }
 
 /// Quello che c'e' gia'.
@@ -57,7 +82,11 @@ pub fn append(model: &str, outcome: &Outcome) -> Result<(), String> {
 /// processo e' morto, e perdere quella non e' un buon motivo per perdere le
 /// novantanove prima.
 pub fn load() -> Vec<Entry> {
-    let Ok(text) = std::fs::read_to_string(path()) else { return Vec::new() };
+    load_su(&path())
+}
+
+pub fn load_su(file: &Path) -> Vec<Entry> {
+    let Ok(text) = std::fs::read_to_string(file) else { return Vec::new() };
     text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect()
 }
 
@@ -89,43 +118,72 @@ mod tests {
         }
     }
 
+    /// Un giornale usa e getta, uno per prova, che sparisce da solo.
+    ///
+    /// Non e' pignoleria: le prove di prima scrivevano sul giornale vero, e
+    /// `cargo test` cancellava le misure. Il nome porta dentro il numero del
+    /// processo e l'istante, cosi' due prove in parallelo non si pestano.
+    struct Usaegetta(PathBuf);
+
+    impl Usaegetta {
+        fn nuovo(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            Self(std::env::temp_dir().join(format!(
+                "logica-prova-giornale-{tag}-{}-{nanos}.jsonl",
+                std::process::id()
+            )))
+        }
+    }
+
+    impl Drop for Usaegetta {
+        fn drop(&mut self) {
+            reset_su(&self.0);
+        }
+    }
+
+    /// Il giornale vero non si tocca mai da qui dentro: se una prova lo
+    /// cancellasse, si porterebbe via ore di misura senza dire niente.
+    #[test]
+    fn the_tests_never_write_where_the_real_measurement_lives() {
+        let g = Usaegetta::nuovo("distinto");
+        assert_ne!(g.0, path(), "una prova sta scrivendo sul giornale vero");
+    }
+
     #[test]
     fn what_was_written_can_be_read_back() {
-        let _home = crate::storage::tests::TempHome::new("giornale");
-        reset();
-        append("modello", &outcome("chat-01")).expect("scrittura");
-        append("modello", &outcome("chat-02")).expect("scrittura");
+        let g = Usaegetta::nuovo("riletto");
+        append_su(&g.0, "modello", &outcome("chat-01")).expect("scrittura");
+        append_su(&g.0, "modello", &outcome("chat-02")).expect("scrittura");
 
-        let entries = load();
+        let entries = load_su(&g.0);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].outcome.id, "chat-01");
         assert_eq!(entries[1].model, "modello");
         assert!((entries[0].outcome.seconds - 1.5).abs() < 1e-6);
-        reset();
     }
 
     /// Il caso per cui il giornale esiste: il processo muore mentre scrive.
     /// L'ultima riga resta a meta', e le altre devono sopravvivere.
     #[test]
     fn a_half_written_line_does_not_take_the_others_down() {
-        let _home = crate::storage::tests::TempHome::new("giornale_rotto");
-        reset();
-        append("modello", &outcome("chat-01")).expect("scrittura");
-        let mut file = std::fs::OpenOptions::new().append(true).open(path()).expect("apertura");
+        let g = Usaegetta::nuovo("rotto");
+        append_su(&g.0, "modello", &outcome("chat-01")).expect("scrittura");
+        let mut file = std::fs::OpenOptions::new().append(true).open(&g.0).expect("apertura");
         write!(file, "{{\"model\":\"modello\",\"id\":\"chat-0").expect("riga a meta'");
         drop(file);
 
-        let entries = load();
+        let entries = load_su(&g.0);
         assert_eq!(entries.len(), 1, "la riga rotta si e' portata via anche quella buona");
         assert_eq!(entries[0].outcome.id, "chat-01");
-        reset();
     }
 
     #[test]
     fn a_journal_that_is_not_there_is_empty_not_an_error() {
-        let _home = crate::storage::tests::TempHome::new("giornale_assente");
-        reset();
-        assert!(load().is_empty());
+        let g = Usaegetta::nuovo("assente");
+        assert!(load_su(&g.0).is_empty());
     }
 
     #[test]

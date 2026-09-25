@@ -25,6 +25,7 @@ const SYSTEM_PROMPT: &str = "Sei Logica, l'assistente personale di questa app de
 
 COME RAGIONI
 - Rispondi alla domanda vera, non a quella piu' comoda. Se la richiesta e' ambigua e le due letture portano a risposte diverse, fai una domanda precisa (una sola, non un questionario); se invece una lettura e' chiaramente la piu' probabile, vai avanti con quella dicendo cosa hai assunto.
+- Quando il messaggio si riferisce a qualcosa che non e' mai stato nominato — un 'lo' in 'aprilo', un 'quello', un 'e' ancora valido?', un 'quanto manca?' — e nella conversazione non c'e' niente a cui possa riferirsi, quella cosa non la sai. Non sceglierla tu e non tirare a indovinare: la risposta giusta e' una domanda sola, che chiede a cosa si riferisce e finisce col punto di domanda. Vale anche quando indovinare sembra facile.
 - Prima la risposta, poi il perche'. Niente preamboli, niente riassunti di cio' che stai per dire, niente chiusure di cortesia.
 - Se non sai una cosa, dillo. Se sei incerto, di' quanto e cosa servirebbe per esserne sicuro. Non inventare mai fatti, numeri, citazioni, funzioni di libreria o percorsi di file.
 - Se l'utente parte da un presupposto sbagliato, dillo apertamente e spiega perche'. Non assecondarlo per educazione.
@@ -55,6 +56,11 @@ const NO_MEMORY: &str = "Ricordi solo la chat corrente: le altre conversazioni n
 /// una a caso.
 const NO_FILE_ACCESS: &str = "Non hai accesso ai file del computer: vedi solo questa conversazione e gli allegati. Se ti chiedono di aprire, cercare o spostare qualcosa sul disco, dillo invece di fingere di averlo fatto; l'utente puo' autorizzare una cartella dalle impostazioni dell'app.";
 
+/// Cosa dire quando nel messaggio c'e' un allegato: li' gli strumenti sui
+/// file sono tolti apposta, e va detto perche', o il modello annuncia che non
+/// puo' aprire niente proprio mentre ha il contenuto sotto gli occhi.
+const ATTACHMENT_ONLY: &str = "Il contenuto dei file allegati e' gia' scritto qui sotto, dentro il messaggio dell'utente, fra i marcatori --- allegato: ... ---. La risposta va cercata li'. In questo turno non hai strumenti per aprire o cercare file sul disco, e non ti servono: se quello che ti chiedono nell'allegato non c'e', dillo, invece di andarlo a cercare altrove o di inventarlo.";
+
 /// Timeout sull'intera risposta in streaming. Un 7B lento sta ben sotto,
 /// una connessione morta non tiene la UI in attesa per sempre.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(300);
@@ -70,6 +76,50 @@ const MAX_TOOL_OUTPUT: usize = 8_000;
 /// Finestra di contesto richiesta a Ollama: il default (2048) taglia le
 /// conversazioni lunghe a meta'.
 const OLLAMA_CONTEXT: u32 = 8192;
+
+/// Quanto Ollama tiene il modello in memoria video dopo una risposta.
+///
+/// Senza questo campo il default e' cinque minuti. Un assistente da scrivania
+/// pero' non si usa di fila: si chiede, si legge, si richiede dieci minuti
+/// dopo — e quella seconda domanda paga il ricaricamento intero prima del
+/// primo carattere. Misurato su `qwen3:14b`: 8,32 secondi a freddo contro zero
+/// a caldo, cioe' piu' di mezza risposta buttata nell'attesa.
+///
+/// La misura delle cento richieste non lo vedeva, perche' spara le domande una
+/// dietro l'altra e trova sempre il modello gia' caldo. E' un costo che paga
+/// solo chi usa il programma davvero.
+///
+/// Il prezzo e' che i dieci gigabyte restano occupati finche' LOGICA e'
+/// aperta. Per questo alla chiusura si chiama `release_ollama`, invece di
+/// lasciarli prenotati per mezz'ora davanti a una finestra che non c'e' piu'.
+const OLLAMA_KEEP_ALIVE: &str = "30m";
+
+/// Dice a Ollama che puo' lasciar andare il modello, alla chiusura di LOGICA.
+///
+/// Il timeout e' corto apposta: questo gira mentre il programma sta uscendo, e
+/// se Ollama non risponde — o non e' nemmeno acceso — non e' un motivo per
+/// tenere aperta la finestra. Fallire qui non fa danno: senza la richiesta il
+/// modello resta in memoria per la mezz'ora dichiarata, e poi se ne va da solo.
+pub fn release_ollama() {
+    let prefs = crate::storage::load_preferences();
+    if prefs.use_premium_ai {
+        return;
+    }
+    let Ok(runtime) = tokio::runtime::Runtime::new() else { return };
+    runtime.block_on(async {
+        let Ok(client) =
+            reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()
+        else {
+            return;
+        };
+        let _ = client
+            .post(format!("{}/api/generate", prefs.ollama_url.trim_end_matches('/')))
+            .json(&serde_json::json!({ "model": prefs.ollama_model, "keep_alive": 0 }))
+            .send()
+            .await;
+    });
+}
+
 
 /// Temperatura della risposta vera: un po' di varieta' fa bene alla prosa.
 const CHAT_TEMPERATURE: f32 = 0.7;
@@ -131,26 +181,47 @@ QUERY: prezzo RTX 5090";
 ///
 /// E' separato dalla risposta, come il pianificatore della ricerca: chiedere
 /// al modello di rispondere *e* di annotare cosa ha imparato lo porta a fare
-/// male le due cose. Il rischio qui non e' dimenticare, e' ricordare troppo:
-/// una memoria piena di dettagli di ieri e' peggio di una memoria vuota.
-const MEMORY_EXTRACTOR: &str = "Sei un estrattore di memoria. Leggi lo scambio e scrivi solo i fatti che varra' la pena sapere anche fra un mese, in una conversazione diversa: come si chiama l'utente, che lavoro fa, che strumenti e linguaggi usa, preferenze stabili su come vuole le risposte, progetti in corso, vincoli suoi.
+/// male le due cose. Ricordare troppo resta un rischio - una memoria piena di
+/// dettagli di ieri e' peggio di una vuota - ma su un modello da 8B il rischio
+/// vero e' l'opposto: preso alla lettera l'avviso "se non c'e' niente rispondi
+/// NIENTE", il modello piccolo sceglie sempre NIENTE, anche davanti a "mi
+/// chiamo Franco". Per questo il prompt mette prima il compito e molti esempi
+/// concreti di cosa salvare, e lascia il NIENTE come l'eccezione che e'.
+const MEMORY_EXTRACTOR: &str = "Sei un estrattore di memoria. Il tuo compito e' salvare i fatti stabili sull'utente, cosi' che un'altra conversazione fra un mese sappia gia' con chi sta parlando.
 
-Regole:
-- Un fatto per riga, al massimo 3 righe, niente elenchi puntati e niente numerazione.
-- Ogni riga e' una frase breve in terza persona che comincia con 'L'utente'.
-- Non scrivere quello che vale solo adesso: la domanda di oggi, il contenuto di un file, un calcolo, una notizia, cosa hai risposto.
-- Non scrivere quello che riguarda te invece dell'utente.
-- Se non c'e' niente da ricordare, rispondi esattamente NIENTE.
-- Scrivi in italiano, anche se lo scambio e' in un'altra lingua: chi legge queste righe si aspetta che comincino per 'L'utente' e scarta le altre.
+Salva: come si chiama, che lavoro fa, dove vive, che strumenti e linguaggi usa, allergie e altri vincoli, le persone della sua vita, i progetti in corso, e come vuole le risposte.
 
-Esempi.
-Scambio: 'come si scrive una regex in Rust?' / '...'
+Scrivi un fatto per riga. Ogni riga e' una frase breve in terza persona che comincia con 'L'utente'. Al massimo 3 righe. In italiano, anche se lo scambio e' in un'altra lingua.
+
+Non salvare quello che vale solo adesso e non dice niente sull'utente: un calcolo, una traduzione, l'ora, una domanda di cultura generale, una spiegazione tecnica che ti ha chiesto, il contenuto di un documento, la risposta che hai dato. In quel caso, e solo in quel caso, rispondi esattamente NIENTE.
+
+Esempi:
+
+Scambio: 'Mi chiamo Franco e faccio l'elettricista.' / 'Piacere.'
+L'utente si chiama Franco
+L'utente fa l'elettricista
+
+Scambio: 'Uso Windows 11 e programmo in Rust.' / 'Buona scelta.'
+L'utente usa Windows 11
+L'utente programma in Rust
+
+Scambio: 'Sono allergico al lattosio, tienine conto.' / 'Me lo segno.'
+L'utente e' allergico al lattosio
+
+Scambio: 'Mia moglie Elena insegna alle medie.' / 'Capito.'
+L'utente ha una moglie di nome Elena che insegna alle medie
+
+Scambio: 'Rispondimi sempre in modo conciso.' / 'Va bene.'
+L'utente vuole risposte concise
+
+Scambio: 'Quanto fa 8 per 9?' / '72.'
 NIENTE
 
-Scambio: 'mi chiamo Franco e lavoro su un gestionale in Rust, rispondimi sempre in italiano' / '...'
-L'utente si chiama Franco
-L'utente lavora a un gestionale scritto in Rust
-L'utente vuole le risposte in italiano";
+Scambio: 'Traduci grazie in tedesco.' / 'Danke.'
+NIENTE
+
+Scambio: 'Spiegami la differenza fra due protocolli di rete.' / '...'
+NIENTE";
 
 /// Prompt del passo che condensa la parte vecchia di una conversazione lunga.
 ///
@@ -217,12 +288,25 @@ enum Chunk {
 /// `web_block` e' il materiale appena scaricato da internet, quando c'e'.
 /// Sta nel prompt di sistema e non in un messaggio dell'utente: cosi' non
 /// finisce nello storico della chat e non si porta dietro il turno dopo.
-fn system_prompt(cfg: &AiConfig, web_block: Option<&str>, file_tools: bool) -> String {
+fn system_prompt(
+    cfg: &AiConfig,
+    web_block: Option<&str>,
+    access: FileAccess,
+    disk_block: Option<&str>,
+) -> String {
     let mut prompt = SYSTEM_PROMPT.to_string();
-    if file_tools {
-        prompt.push_str(&format!("\n\n{}", tools::roots_block()));
-    } else {
-        prompt.push_str(&format!("\n- {NO_FILE_ACCESS}"));
+    match access {
+        FileAccess::Strumenti => {
+            prompt.push_str(&format!("\n\n{}", tools::roots_block()));
+            // Quello che il programma e' gia' andato a leggere sul disco per
+            // conto suo: l'elenco dei file e le righe che parlano della
+            // domanda. E' il primo anello della catena, tolto al modello.
+            if let Some(block) = disk_block {
+                prompt.push_str(&format!("\n\n{block}"));
+            }
+        }
+        FileAccess::Allegato => prompt.push_str(&format!("\n- {ATTACHMENT_ONLY}")),
+        FileAccess::Niente => prompt.push_str(&format!("\n- {NO_FILE_ACCESS}")),
     }
     match cfg.memory.then(memory::prompt_block).flatten() {
         Some(block) => prompt.push_str(&format!("\n\n{block}")),
@@ -411,6 +495,67 @@ fn claude_chunk(line: &str) -> Chunk {
     }
 }
 
+/// Trattiene il testo che potrebbe essere una chiamata a uno strumento scritta
+/// a mano, invece di mandarlo a schermo mentre arriva.
+///
+/// Serve perche' lo streaming non si annulla: quando la riga
+/// `{"name": "read_file", ...}` e' finita davanti agli occhi dell'utente, non
+/// c'e' piu' modo di toglierla. Nella misura delle cento richieste succedeva
+/// diciotto volte su cento con `llama3.1:8b`.
+///
+/// La decisione si prende una volta sola, sul primo pezzo di testo che arriva:
+/// se comincia con una graffa o con un blocco di codice, tutto il giro resta
+/// trattenuto fino alla fine, e alla fine o e' una chiamata (e allora non si
+/// mostra) o non lo e' (e allora si mostra intera). Una risposta vera che
+/// comincia per graffa arriva tutta insieme invece che a pezzi: e' l'unico
+/// prezzo, e si paga quasi mai.
+struct Freno {
+    testo: String,
+    emesso: usize,
+    trattiene: bool,
+    deciso: bool,
+}
+
+impl Freno {
+    fn new() -> Self {
+        Self { testo: String::new(), emesso: 0, trattiene: false, deciso: false }
+    }
+
+    fn push(&mut self, delta: &str, on_delta: &mut impl FnMut(&str)) {
+        self.testo.push_str(delta);
+        if !self.deciso {
+            let inizio = self.testo.trim_start();
+            if inizio.is_empty() {
+                return;
+            }
+            self.trattiene = inizio.starts_with('{') || inizio.starts_with("```");
+            self.deciso = true;
+        }
+        if !self.trattiene {
+            on_delta(&self.testo[self.emesso..]);
+            self.emesso = self.testo.len();
+        }
+    }
+
+    /// Chiude il giro. Torna la chiamata se il testo trattenuto era una
+    /// chiamata a uno strumento vero; altrimenti manda a schermo quello che
+    /// aveva tenuto da parte, perche' non era niente di speciale.
+    fn chiudi(&mut self, on_delta: &mut impl FnMut(&str)) -> Option<ToolCall> {
+        if self.trattiene {
+            if let Some(call) = tools::handwritten_call(&self.testo) {
+                self.testo.clear();
+                self.emesso = 0;
+                return Some(call);
+            }
+        }
+        if self.emesso < self.testo.len() {
+            on_delta(&self.testo[self.emesso..]);
+            self.emesso = self.testo.len();
+        }
+        None
+    }
+}
+
 /// Legge la risposta riga per riga e passa il testo a `on_delta` mano a mano.
 /// Si ferma da sola quando lo stream finisce, quando il modello dice `done`
 /// o quando `cancel` viene alzato da "Interrompi".
@@ -420,7 +565,7 @@ async fn consume(
     cancel: &AtomicBool,
     on_delta: &mut impl FnMut(&str),
 ) -> Reply {
-    let mut text = String::new();
+    let mut freno = Freno::new();
     let mut error = None;
     let mut buffer: Vec<u8> = Vec::new();
     let mut stream = res.bytes_stream();
@@ -431,7 +576,8 @@ async fn consume(
 
     while let Some(next) = stream.next().await {
         if cancel.load(Ordering::Relaxed) {
-            return Reply::new(text, true, error, Vec::new());
+            freno.chiudi(on_delta);
+            return Reply::new(freno.testo, true, error, Vec::new());
         }
         let bytes = match next {
             Ok(b) => b,
@@ -448,14 +594,10 @@ async fn consume(
             let line: Vec<u8> = buffer.drain(..=end).collect();
             let line = String::from_utf8_lossy(&line);
             match parse(&line) {
-                Chunk::Text(delta) => {
-                    on_delta(&delta);
-                    text.push_str(&delta);
-                }
+                Chunk::Text(delta) => freno.push(&delta, on_delta),
                 Chunk::Tools { text: delta, calls: found } => {
                     if !delta.is_empty() {
-                        on_delta(&delta);
-                        text.push_str(&delta);
+                        freno.push(&delta, on_delta);
                     }
                     calls.extend(found);
                 }
@@ -477,8 +619,8 @@ async fn consume(
                         calls.push(ToolCall { id, name, input });
                     }
                 }
-                Chunk::Done => return Reply::new(text, false, error, calls),
-                Chunk::Error(e) => return Reply::new(text, false, Some(e), calls),
+                Chunk::Done => return chiusura(&mut freno, error, calls, on_delta),
+                Chunk::Error(e) => return chiusura(&mut freno, Some(e), calls, on_delta),
                 Chunk::Skip => {}
             }
         }
@@ -487,31 +629,49 @@ async fn consume(
     // Ultima riga senza '\n' finale.
     if !buffer.is_empty() {
         match parse(&String::from_utf8_lossy(&buffer)) {
-            Chunk::Text(delta) => {
-                on_delta(&delta);
-                text.push_str(&delta);
-            }
+            Chunk::Text(delta) => freno.push(&delta, on_delta),
             Chunk::Tools { text: delta, calls: found } => {
                 if !delta.is_empty() {
-                    on_delta(&delta);
-                    text.push_str(&delta);
+                    freno.push(&delta, on_delta);
                 }
                 calls.extend(found);
             }
             _ => {}
         }
     }
-    Reply::new(text, false, error, calls)
+    chiusura(&mut freno, error, calls, on_delta)
+}
+
+/// Chiude il freno e mette insieme la risposta. Una chiamata scritta a mano si
+/// aggiunge alle altre: da qui in poi e' una chiamata come tutte.
+fn chiusura(
+    freno: &mut Freno,
+    error: Option<String>,
+    mut calls: Vec<ToolCall>,
+    on_delta: &mut impl FnMut(&str),
+) -> Reply {
+    if let Some(call) = freno.chiudi(on_delta) {
+        calls.push(call);
+    }
+    Reply::new(std::mem::take(&mut freno.testo), false, error, calls)
 }
 
 /* ------------------------------ chiamate HTTP ----------------------------- */
 
+/// `thinking` a `false` spegne il ragionamento ad alta voce dei modelli che ce
+/// l'hanno. Serve ai lavoretti di servizio (i classificatori, il titolo, il
+/// riassunto): li' la risposta e' una riga, e `qwen3:14b` ci mette 3,8 secondi
+/// di mediana a pensarla contro meno di uno a scriverla e basta. Il campo si
+/// aggiunge solo per spegnerlo: cosi' chi risponde con una versione di Ollama
+/// che non lo conosce riceve la richiesta di sempre.
+#[allow(clippy::too_many_arguments)]
 async fn stream_ollama(
     cfg: &AiConfig,
     system: &str,
     messages: &[serde_json::Value],
     temperature: f32,
     tools: Option<&[serde_json::Value]>,
+    thinking: bool,
     cancel: &AtomicBool,
     on_delta: &mut impl FnMut(&str),
 ) -> Result<Reply, String> {
@@ -522,10 +682,14 @@ async fn stream_ollama(
         "model": cfg.ollama_model,
         "messages": all,
         "stream": true,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": { "temperature": temperature, "num_ctx": OLLAMA_CONTEXT }
     });
     if let Some(tools) = tools {
         body["tools"] = serde_json::json!(tools);
+    }
+    if !thinking {
+        body["think"] = serde_json::json!(false);
     }
 
     let client = reqwest::Client::builder()
@@ -617,7 +781,8 @@ async fn ask(system: &str, prompt: &str, cfg: &AiConfig) -> Option<String> {
     let reply = if cfg.use_premium_ai {
         stream_claude(system, &messages, SERVICE_TEMPERATURE, None, &cancel, &mut sink).await
     } else {
-        stream_ollama(cfg, system, &messages, SERVICE_TEMPERATURE, None, &cancel, &mut sink).await
+        stream_ollama(cfg, system, &messages, SERVICE_TEMPERATURE, None, false, &cancel, &mut sink)
+            .await
     }
     .ok()?;
     Some(reply.text)
@@ -759,16 +924,7 @@ fn query_from_message(message: &str, history: &[ChatTurn]) -> Option<String> {
 /// Chiede al modello se questa domanda ha bisogno di internet, e con quale
 /// query. `None` significa: rispondi con quello che sai.
 async fn plan_search(message: &str, history: &[ChatTurn], cfg: &AiConfig) -> Option<String> {
-    let start = history.len().saturating_sub(4);
-    let recent: String = history[start..]
-        .iter()
-        .map(|t| {
-            let who = if t.role == "user" { "Utente" } else { "Assistente" };
-            format!("{who}: {}
-", truncate(&t.content, 300))
-        })
-        .collect();
-
+    let recent = recent_turns(history);
     let forced = wants_search(message);
     let order = if forced {
         "
@@ -866,6 +1022,247 @@ async fn gather_web(
     Some((web::as_prompt_block(&research), hits))
 }
 
+/* ------------------ quando gli strumenti si dichiarano ------------------- */
+
+/// Che cosa vede del disco il modello, in questo turno.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileAccess {
+    /// Strumenti dichiarati: la richiesta riguarda quello che l'utente ha sul
+    /// computer.
+    Strumenti,
+    /// Niente strumenti perche' il contenuto e' gia' nel messaggio: c'e' un
+    /// allegato, e la risposta sta li' dentro.
+    Allegato,
+    /// Niente strumenti: spenti dall'utente, nessuna cartella autorizzata, o
+    /// una domanda che con i file non c'entra.
+    Niente,
+}
+
+/// Il marcatore con cui la finestra della chat incolla sotto al messaggio il
+/// contenuto di un file allegato (`promptContent`, in `ChatPage.tsx`).
+const ATTACHMENT_MARK: &str = "--- allegato:";
+/// Le immagini viaggiano a parte, nel campo apposta: nel testo del messaggio
+/// ne resta solo questa etichetta.
+const IMAGE_MARK: &str = "--- immagine allegata:";
+/// Coda del marcatore quando il file non si e' riuscito a leggerlo.
+const UNREAD_MARK: &str = "(non letto:";
+
+/// C'e' un allegato, e il suo contenuto e' arrivato davvero.
+///
+/// Un allegato che non si e' riusciti a leggere non vale: li' dentro non c'e'
+/// niente da leggere, e cercare il file sul disco resta l'unica strada.
+fn attachment_in(message: &str) -> bool {
+    message.lines().any(|line| {
+        let line = line.trim_start();
+        (line.starts_with(ATTACHMENT_MARK) && !line.contains(UNREAD_MARK))
+            || line.starts_with(IMAGE_MARK)
+    })
+}
+
+/// Radici di parole con cui si parla di quello che sta sul disco. Si tagliano
+/// per radice perche' l'italiano declina: "cartella", "cartelle".
+const FILE_WORDS: [&str; 12] = [
+    "file",
+    "cartell",
+    "sottocartell",
+    "directory",
+    "percors",
+    "desktop",
+    "scrivania",
+    "sul disco",
+    "chiavetta",
+    "sul computer",
+    "sul pc",
+    "nel computer",
+];
+
+/// Estensioni che in mezzo a una frase nominano un file e non una parola. La
+/// lista e' chiusa apposta: una regola generica su "punto piu' tre lettere"
+/// prenderebbe anche `www.google.com` e ogni frase che finisce con un punto.
+const EXTENSIONS: [&str; 34] = [
+    "txt", "md", "pdf", "doc", "docx", "odt", "xls", "xlsx", "ods", "csv", "ppt", "pptx", "rtf",
+    "json", "xml", "yaml", "yml", "toml", "ini", "log", "sql", "rs", "ts", "tsx", "js", "jsx",
+    "py", "java", "html", "css", "png", "jpg", "jpeg", "zip",
+];
+
+/// Il messaggio nomina un percorso, un file con l'estensione, una parola che
+/// parla del disco o una delle cartelle autorizzate.
+///
+/// E' lo strato che costa zero: quando risponde di si', il classificatore non
+/// viene nemmeno chiamato.
+fn names_a_file(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    // Un percorso Windows: la lettera dell'unita' e la barra.
+    if lower.contains(":\\") || lower.contains(":/") {
+        return true;
+    }
+    if FILE_WORDS.iter().any(|w| lower.contains(w)) {
+        return true;
+    }
+    if tools::roots_names().iter().any(|n| lower.contains(n.as_str())) {
+        return true;
+    }
+    lower
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ',' | ';'))
+        .filter_map(|word| word.trim_end_matches(['.', '!', '?', ':']).rsplit_once('.'))
+        .any(|(name, ext)| !name.is_empty() && EXTENSIONS.contains(&ext))
+}
+
+/// Modi in cui si parla di una cosa propria: il possessivo davanti a un
+/// oggetto ("la matricola della *mia* caldaia") o un acquisto passato
+/// ("quanto *ho speso*"). La risposta a una domanda cosi' non sta nella
+/// cultura generale del modello: o e' nei file, o non c'e'.
+const OWNED_WORDS: [&str; 12] = [
+    " mia ",
+    " mio ",
+    " miei ",
+    " mie ",
+    "ho speso",
+    "ho pagato",
+    "ho comprato",
+    "ho salvato",
+    "ho scritto",
+    "ho ricevuto",
+    "mi hanno mandato",
+    "mi hanno fatto",
+];
+
+/// Una domanda su una cosa che appartiene all'utente.
+///
+/// Deve essere una domanda: "Mia moglie Elena insegna alle medie" e' un fatto
+/// da ricordare, non una richiesta di aprire qualcosa, e trattarlo come tale
+/// farebbe partire una visita del disco a ogni confidenza.
+///
+/// Vale come strato deterministico perche' il classificatore qui sbaglia: su
+/// "Qual e' la matricola della mia caldaia?" `llama3.1:8b` risponde FILE: no,
+/// e gli strumenti non vengono nemmeno dichiarati.
+fn owned_thing_question(message: &str) -> bool {
+    let lower = format!(" {} ", message.to_lowercase());
+    lower.contains('?') && OWNED_WORDS.iter().any(|w| lower.contains(w))
+}
+
+/// Chiede al modello se per rispondere bisogna andare a guardare nei file.
+/// E' lo stesso mestiere di `SEARCH_PLANNER`, sull'altra fonte.
+const FILE_PLANNER: &str = "Sei un classificatore. Non rispondi mai alla domanda dell'utente: decidi solo se per rispondere bisogna andare a guardare nei file che l'utente ha sul suo computer.
+
+Rispondi con una riga sola, esattamente in questo formato:
+FILE: si oppure no
+
+FILE: si quando la risposta puo' stare solo in qualcosa che l'utente ha sul disco: le sue bollette, le sue spese, i suoi appunti, le sue foto, i suoi documenti, il suo codice, quello che ha scaricato o salvato. Vale anche quando non nomina ne' file ne' cartelle: 'quanto ho speso per la caldaia' e' una domanda sui suoi file.
+FILE: no per cultura generale, matematica e calcoli, definizioni, codice da scrivere, traduzioni, riassunti e riscritture, opinioni, saluti e ringraziamenti, e domande su quello che e' gia' scritto in questa conversazione.
+FILE: no anche quando l'utente punta a qualcosa con un pronome o una domanda che non nomina nessuna cosa - 'aprilo', 'mandalo', 'e' ancora valido?', 'quanto manca?' - e ne' questo messaggio ne' quelli prima dicono di quale cosa si tratti: non c'e' nessun file da aprire finche' non lo si sa. Ma se il messaggio la cosa la nomina - 'la macchina', 'l'ultimo tagliando', 'la caldaia' - allora si sa dove guardare, e vale la regola sopra: FILE: si.
+Nel dubbio, FILE: no: aprire i file per una domanda che non lo chiedeva costa tempo e porta la risposta fuori strada.
+
+Esempi.
+Utente: quali sono i primi cinque numeri primi
+FILE: no
+
+Utente: aprilo e dimmi quanto costa
+FILE: no
+
+Utente: e' ancora valido?
+FILE: no
+
+Utente: quanti chilometri aveva la macchina all'ultimo tagliando
+FILE: si
+
+Utente: quanto ho pagato di bolletta della luce a gennaio
+FILE: si
+
+Utente: com'e' andata la riunione di ieri? avevo preso appunti
+FILE: si
+
+Utente: scrivi una funzione python che ordina una lista
+FILE: no
+
+Utente: riassumi il testo che ti ho appena incollato
+FILE: no";
+
+/// Legge la risposta del classificatore.
+///
+/// Due passate, come per la ricerca: prima la riga con l'etichetta, che vince
+/// sempre; solo se non c'e' si guarda la prima riga che dice si' o no. Un
+/// modello che ragiona ad alta voce scrive dei "no" dentro il ragionamento, e
+/// senza le due passate il primo di quelli deciderebbe al posto dell'etichetta.
+fn wants_files(raw: &str) -> bool {
+    for line in raw.lines() {
+        if let Some((label, value)) = ripulita(line).split_once(':') {
+            if label.trim() == "file" {
+                return dice_si(&ripulita(value));
+            }
+        }
+    }
+    raw.lines()
+        .map(ripulita)
+        .find(|l| dice_si(l) || l.starts_with("no"))
+        .is_some_and(|l| dice_si(&l))
+}
+
+/// Una riga del classificatore senza le decorazioni che i modelli piccoli ci
+/// mettono intorno.
+fn ripulita(line: &str) -> String {
+    line.trim()
+        .trim_matches(|c: char| c == '*' || c == '`')
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'')
+        .trim()
+        .to_lowercase()
+}
+
+fn dice_si(value: &str) -> bool {
+    value.starts_with("si") || value.starts_with("s\u{ec}") || value.starts_with("yes")
+}
+
+/// Gli ultimi turni, per dare un contesto ai classificatori: senza, un "e il
+/// secondo?" non si capisce.
+fn recent_turns(history: &[ChatTurn]) -> String {
+    let start = history.len().saturating_sub(4);
+    history[start..]
+        .iter()
+        .map(|t| {
+            let who = if t.role == "user" { "Utente" } else { "Assistente" };
+            format!("{who}: {}\n", truncate(&t.content, 300))
+        })
+        .collect()
+}
+
+/// Decide che cosa dare in mano al modello per questo turno.
+///
+/// Il modello non deve poter fare una cosa stupida solo perche' lo strumento
+/// era li': una `find_files` per "quali sono i primi cinque numeri primi" non
+/// e' un prompt scritto male, e' uno strumento offerto quando non serviva. Il
+/// vaglio ha tre strati, dal piu' economico al piu' caro, e solo l'ultimo
+/// costa una chiamata in piu' al modello.
+async fn file_access(message: &str, history: &[ChatTurn], cfg: &AiConfig) -> FileAccess {
+    // Dichiarare strumenti che non possono guardare da nessuna parte fa
+    // perdere al modello sei giri contro lo stesso rifiuto.
+    if !cfg.file_tools || !tools::available() {
+        return FileAccess::Niente;
+    }
+    // Un allegato letto e' la fonte migliore che ci sia: il contenuto e' gia'
+    // nel messaggio. Toglierli qui non e' un consiglio scritto nel prompt ma
+    // una impossibilita', ed e' voluto: nella misura delle cento richieste
+    // meta' delle domande sugli allegati finiva in una ricerca sul disco di un
+    // file che il modello aveva gia' davanti agli occhi.
+    if attachment_in(message) {
+        return FileAccess::Allegato;
+    }
+    if names_a_file(message) || owned_thing_question(message) {
+        return FileAccess::Strumenti;
+    }
+    let prompt = format!(
+        "{}Ultimo messaggio dell'utente: {}",
+        recent_turns(history),
+        truncate(message, 1000)
+    );
+    match ask(FILE_PLANNER, &prompt, cfg).await {
+        Some(raw) if wants_files(&raw) => FileAccess::Strumenti,
+        // Classificatore muto (motore giu', risposta storta): senza una
+        // ragione per accenderli, gli strumenti restano spenti.
+        _ => FileAccess::Niente,
+    }
+}
+
 /* ------------------------------ conversazione ----------------------------- */
 
 /// Un turno di conversazione. `on_delta` viene chiamata a ogni pezzo di testo
@@ -898,10 +1295,11 @@ pub async fn stream_reply(
         None => (None, Vec::new()),
     };
 
-    // Gli strumenti si accendono solo se l'utente li vuole e se c'e' davvero
-    // una cartella autorizzata: dichiararli a vuoto fa perdere al modello sei
-    // giri contro lo stesso rifiuto.
-    let file_tools = cfg.file_tools && tools::available();
+    // Non basta che l'utente li abbia accesi: gli strumenti si dichiarano
+    // solo se questa richiesta li vuole davvero. Il perche', e i tre strati
+    // del vaglio, stanno in `file_access`.
+    let access = file_access(message, history, cfg).await;
+    let file_tools = access == FileAccess::Strumenti;
     let (older, start) = condense(chat_id, history, cfg, &mut on_status).await;
 
     // Gli estratti dai documenti costano una sola chiamata di embedding, corta
@@ -914,7 +1312,37 @@ pub async fn stream_reply(
         Vec::new()
     };
 
-    let mut system = system_prompt(cfg, block.as_deref(), file_tools);
+    // Quello che il programma va a leggere sul disco da solo, prima di
+    // parlare: l'elenco dei file e le righe che parlano della domanda. Sono
+    // due letture vere, e finiscono in `tools_used` come quelle chieste dal
+    // modello — perche' e' quello che e' successo, e chi legge la risposta ha
+    // il diritto di sapere da dove viene.
+    let mut tools_used: Vec<ToolUse> = Vec::new();
+    let disk_block = if file_tools {
+        on_status("Guardo nelle tue cartelle");
+        let mut parts: Vec<String> = Vec::new();
+        let tree = tools::tree_block();
+        if !tree.is_empty() {
+            tools_used.push(ToolUse {
+                name: "list_dir".to_string(),
+                detail: "le cartelle autorizzate".to_string(),
+            });
+            parts.push(tree);
+        }
+        let hints = tools::hints_block(message);
+        if !hints.is_empty() {
+            tools_used.push(ToolUse {
+                name: "search_in_files".to_string(),
+                detail: tools::hint_summary(message),
+            });
+            parts.push(hints);
+        }
+        (!parts.is_empty()).then(|| parts.join("\n\n"))
+    } else {
+        None
+    };
+
+    let mut system = system_prompt(cfg, block.as_deref(), access, disk_block.as_deref());
     if !documents.is_empty() {
         system.push_str(&format!("\n\n{}", rag::as_prompt_block(&documents)));
     }
@@ -927,7 +1355,6 @@ pub async fn stream_reply(
     // eventi `assistant-delta`, quindi deve ritrovarsi anche nella risposta
     // salvata, o la chat ricaricata risulterebbe monca.
     let mut carried = String::new();
-    let mut tools_used: Vec<ToolUse> = Vec::new();
     let mut step = 0usize;
 
     let mut reply = loop {
@@ -961,6 +1388,24 @@ pub async fn stream_reply(
         step += 1;
     };
 
+    // Il modello ha scritto una chiamata quando non poteva usarla: o gli
+    // strumenti erano spenti, o era l'ultimo giro. Il freno l'ha tolta dalla
+    // vista, quindi adesso non c'e' niente da mostrare. Un giro in piu', senza
+    // strumenti e dicendoglielo, e' meglio di una risposta vuota: nella misura
+    // erano domande a cui sapeva rispondere da solo, tipo "quanto fa 17 per
+    // 23", a cui aveva risposto inventandosi uno strumento `math`.
+    if reply.text.trim().is_empty() && !reply.tool_calls.is_empty() && carried.trim().is_empty() {
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": "Non hai strumenti a disposizione per questa richiesta. Rispondi                         direttamente, con quello che sai, senza chiamare niente."
+        }));
+        if let Ok(secondo) = run_turn(cfg, &system, &messages, false, cancel, &mut on_delta).await {
+            if !secondo.text.trim().is_empty() {
+                reply = secondo;
+            }
+        }
+    }
+
     reply.text = format!("{carried}{}", reply.text);
     reply.sources = sources;
     reply.tools_used = tools_used;
@@ -992,7 +1437,7 @@ async fn run_turn(
     let attempt = if cfg.use_premium_ai {
         stream_claude(system, messages, CHAT_TEMPERATURE, declared.as_deref(), cancel, on_delta).await
     } else {
-        stream_ollama(cfg, system, messages, CHAT_TEMPERATURE, declared.as_deref(), cancel, on_delta)
+        stream_ollama(cfg, system, messages, CHAT_TEMPERATURE, declared.as_deref(), true, cancel, on_delta)
             .await
     };
 
@@ -1002,7 +1447,8 @@ async fn run_turn(
             if cfg.use_premium_ai {
                 stream_claude(system, messages, CHAT_TEMPERATURE, None, cancel, on_delta).await
             } else {
-                stream_ollama(cfg, system, messages, CHAT_TEMPERATURE, None, cancel, on_delta).await
+                stream_ollama(cfg, system, messages, CHAT_TEMPERATURE, None, true, cancel, on_delta)
+                    .await
             }
         }
         other => other,
@@ -1280,12 +1726,12 @@ mod tests {
     #[test]
     fn user_instructions_reach_the_prompt() {
         let cfg = AiConfig { user_preferences: "  parlami in modo tecnico  ".to_string(), ..AiConfig::default() };
-        let prompt = system_prompt(&cfg, None, false);
+        let prompt = system_prompt(&cfg, None, FileAccess::Niente, None);
         assert!(prompt.contains("parlami in modo tecnico"));
         assert!(prompt.contains("Data di oggi"));
 
         // Senza istruzioni non si aggiunge una sezione vuota.
-        let plain = system_prompt(&AiConfig::default(), None, false);
+        let plain = system_prompt(&AiConfig::default(), None, FileAccess::Niente, None);
         assert!(!plain.contains("Istruzioni scritte dall'utente"));
     }
 
@@ -1321,20 +1767,164 @@ mod tests {
 
     #[test]
     fn memory_is_described_once_and_in_one_verse_only() {
-        let forgetful = system_prompt(&AiConfig { memory: false, ..AiConfig::default() }, None, false);
+        let forgetful = system_prompt(&AiConfig { memory: false, ..AiConfig::default() }, None, FileAccess::Niente, None);
         assert!(forgetful.contains("Ricordi solo la chat corrente"));
         assert!(!forgetful.contains("QUELLO CHE SAI GIA'"));
     }
 
     #[test]
     fn file_access_is_described_once_and_in_one_verse_only() {
-        let closed = system_prompt(&AiConfig::default(), None, false);
+        let closed = system_prompt(&AiConfig::default(), None, FileAccess::Niente, None);
         assert!(closed.contains("Non hai accesso ai file"));
         assert!(!closed.contains("STRUMENTI SUI FILE"));
 
-        let open = system_prompt(&AiConfig::default(), None, true);
+        let open = system_prompt(&AiConfig::default(), None, FileAccess::Strumenti, None);
         assert!(open.contains("STRUMENTI SUI FILE"));
         assert!(!open.contains("Non hai accesso ai file"));
+    }
+
+    #[test]
+    fn con_un_allegato_il_prompt_dice_dove_guardare() {
+        let allegato = system_prompt(&AiConfig::default(), None, FileAccess::Allegato, None);
+        // Ne' l'elenco delle cartelle (che inviterebbe a cercare il file), ne'
+        // "non hai accesso ai file" (che e' falso: il contenuto ce l'ha).
+        assert!(!allegato.contains("STRUMENTI SUI FILE"));
+        assert!(!allegato.contains("Non hai accesso ai file"));
+        assert!(allegato.contains("--- allegato:"));
+    }
+
+    #[test]
+    fn un_allegato_letto_si_riconosce_dal_marcatore() {
+        assert!(attachment_in("Quanto e' il totale?\n\n--- allegato: preventivo.pdf ---\nTotale 7.440,30"));
+        assert!(attachment_in("Cosa si vede?\n\n--- immagine allegata: foto.png ---"));
+        assert!(!attachment_in("Quanto e' il totale del preventivo?"));
+        // Un allegato che non si e' riusciti a leggere non e' una fonte: li'
+        // dentro non c'e' niente, e gli strumenti servono ancora.
+        assert!(!attachment_in("Aprilo tu\n\n--- allegato: bolletta.pdf (non letto: file protetto) ---"));
+    }
+
+    #[test]
+    fn i_percorsi_e_le_estensioni_accendono_gli_strumenti_da_soli() {
+        assert!(names_a_file(r"apri C:\Users\franc\note.txt"));
+        assert!(names_a_file("cosa c'e' nella cartella dei download?"));
+        assert!(names_a_file("leggimi appunti.md"));
+        assert!(names_a_file("quanti file ho sul desktop"));
+    }
+
+    #[test]
+    fn una_domanda_qualunque_non_li_accende() {
+        // Le richieste su cui il modello apriva i file per niente.
+        assert!(!names_a_file("Quali sono i primi cinque numeri primi?"));
+        assert!(!names_a_file("Qual e' la capitale dell'Australia?"));
+        assert!(!names_a_file("Quanto fa 17 per 23?"));
+        // Un indirizzo non e' un nome di file: ".com" non e' una estensione.
+        assert!(!names_a_file("cosa ne pensi di www.google.com"));
+        // E nemmeno la fine di una frase.
+        assert!(!names_a_file("Spiegami la fotosintesi. Grazie."));
+    }
+
+    #[test]
+    fn una_cosa_mia_accende_gli_strumenti_senza_chiedere_al_modello() {
+        // Il caso che il classificatore sbagliava: nessuna parola sui file,
+        // ma la risposta puo' stare solo sul disco.
+        assert!(owned_thing_question("Qual e' la matricola della mia caldaia?"));
+        assert!(owned_thing_question("Quanto ho speso per l'alloggio a Lisbona?"));
+        assert!(owned_thing_question("Quante mele servono nella ricetta che ho salvato?"));
+    }
+
+    #[test]
+    fn una_confidenza_non_e_una_richiesta_di_aprire() {
+        // Fatti da ricordare, non domande: il possessivo da solo non basta.
+        assert!(!owned_thing_question("Mia moglie Elena insegna alle medie."));
+        assert!(!owned_thing_question("Ho comprato una casa in Trentino."));
+        // E una domanda senza niente di suo resta una domanda da cultura
+        // generale.
+        assert!(!owned_thing_question("Qual e' la capitale dell'Australia?"));
+        assert!(!owned_thing_question("Quanto fa 17 per 23?"));
+    }
+
+    #[test]
+    fn il_classificatore_si_legge_anche_quando_sbava() {
+        assert!(wants_files("FILE: si"));
+        assert!(wants_files("**FILE:** si, servono i suoi appunti"));
+        assert!(!wants_files("FILE: no"));
+        // Senza etichetta resta la prima riga che decide.
+        assert!(wants_files("si"));
+        assert!(!wants_files("no, questa la sa gia'"));
+        // Un modello che ragiona ad alta voce: comanda l'etichetta, non il
+        // primo "no" che gli scappa nel ragionamento.
+        assert!(wants_files("no, aspetta: la bolletta ce l'ha sul disco.\nFILE: si"));
+        // Niente di leggibile: gli strumenti restano spenti.
+        assert!(!wants_files(""));
+        assert!(!wants_files("boh"));
+    }
+
+        /// Raccoglie quello che il freno lascia passare, come farebbe lo schermo.
+    fn a_schermo(pezzi: &[&str]) -> (String, Option<String>) {
+        let mut visto = String::new();
+        let mut freno = Freno::new();
+        let chiamata = {
+            let mut on_delta = |d: &str| visto.push_str(d);
+            for p in pezzi {
+                freno.push(p, &mut on_delta);
+            }
+            freno.chiudi(&mut on_delta)
+        };
+        (visto, chiamata.map(|c| c.name))
+    }
+
+    /// Il difetto per cui il freno esiste: `llama3.1:8b` scrive la chiamata nel
+    /// testo, e prima finiva stampata in chat cosi' com'era.
+    #[test]
+    fn a_call_written_as_text_never_reaches_the_screen() {
+        let (visto, chiamata) = a_schermo(&[
+            r#"{"name": "read_file", "para"#,
+            r#"meters": {"path": "C:\Temp\acqua.txt"}}"#,
+        ]);
+        assert_eq!(visto, "", "la chiamata e' finita a schermo");
+        assert_eq!(chiamata.as_deref(), Some("read_file"));
+    }
+
+    /// Lo strumento inventato non e' una chiamata, ma il JSON resta roba da non
+    /// mostrare: esce come testo perche' non c'e' altro da fare, ed e' il giro
+    /// di recupero in `talk` a rimediare.
+    #[test]
+    fn an_invented_tool_is_not_turned_into_a_call() {
+        let (_, chiamata) = a_schermo(&[r#"{"name": "math", "parameters": {"a": "17"}}"#]);
+        assert!(chiamata.is_none());
+    }
+
+    /// Una risposta normale non deve essere trattenuta nemmeno un pezzo.
+    #[test]
+    fn ordinary_text_still_arrives_piece_by_piece() {
+        let mut visto = Vec::new();
+        let mut freno = Freno::new();
+        {
+            let mut on_delta = |d: &str| visto.push(d.to_string());
+            freno.push("Fa ", &mut on_delta);
+            freno.push("391.", &mut on_delta);
+            assert!(freno.chiudi(&mut on_delta).is_none());
+        }
+        assert_eq!(visto, vec!["Fa ".to_string(), "391.".to_string()]);
+    }
+
+    /// Trattenuto ma non era una chiamata: si mostra tutto, niente si perde.
+    #[test]
+    fn text_held_back_for_nothing_is_shown_in_full() {
+        let json = r#"{"chiave": "valore", "altro": 2}"#;
+        let (visto, chiamata) = a_schermo(&[json]);
+        assert!(chiamata.is_none());
+        assert_eq!(visto, json, "il testo trattenuto e' sparito");
+    }
+
+    /// La decisione si prende una volta sola: un testo che comincia in prosa
+    /// non viene trattenuto neanche se poi contiene una graffa.
+    #[test]
+    fn the_decision_is_taken_once_at_the_start() {
+        let (visto, chiamata) =
+            a_schermo(&["Nel file c'e' ", r#"{"name": "read_file", "parameters": {}}"#]);
+        assert!(chiamata.is_none());
+        assert!(visto.starts_with("Nel file c'e' "));
     }
 
     #[test]
@@ -1497,12 +2087,12 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
     #[test]
     fn web_material_reaches_the_prompt() {
         let block = "RISULTATI DAL WEB\n[1] Titolo - https://esempio.it\nriassunto";
-        let prompt = system_prompt(&AiConfig::default(), Some(block), false);
+        let prompt = system_prompt(&AiConfig::default(), Some(block), FileAccess::Niente, None);
         assert!(prompt.contains("https://esempio.it"));
         assert!(prompt.contains("Cita le fonti"));
 
         // Senza ricerca il prompt non parla di fonti da citare.
-        assert!(!system_prompt(&AiConfig::default(), None, false).contains("Cita le fonti"));
+        assert!(!system_prompt(&AiConfig::default(), None, FileAccess::Niente, None).contains("Cita le fonti"));
     }
 
     /// Il giro completo con internet, contro Ollama e contro il web vero:
@@ -1512,7 +2102,7 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
     fn live_web_flow_searches_only_when_needed() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime tokio");
         let cfg = AiConfig {
-            ollama_model: std::env::var("FOAI_TEST_MODEL").unwrap_or_else(|_| "mistral".to_string()),
+            ollama_model: std::env::var("FOAI_TEST_MODEL").unwrap_or_else(|_| "qwen3:14b".to_string()),
             ..AiConfig::default()
         };
 
@@ -1580,7 +2170,7 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
 
         let cfg = AiConfig {
             ollama_model: std::env::var("FOAI_TEST_MODEL")
-                .unwrap_or_else(|_| "llama3.1:8b".to_string()),
+                .unwrap_or_else(|_| "qwen3:14b".to_string()),
             file_tools: true,
             // Ricerca web e memoria spente: qui si guarda una cosa sola.
             web_search: false,
@@ -1627,7 +2217,7 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
     fn live_ollama_stream_arrives_in_pieces() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime tokio");
         let cfg = AiConfig {
-            ollama_model: std::env::var("FOAI_TEST_MODEL").unwrap_or_else(|_| "mistral".to_string()),
+            ollama_model: std::env::var("FOAI_TEST_MODEL").unwrap_or_else(|_| "qwen3:14b".to_string()),
             ..AiConfig::default()
         };
 
@@ -1663,7 +2253,7 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
         let runtime = tokio::runtime::Runtime::new().expect("runtime tokio");
         let cfg = AiConfig {
             ollama_model: std::env::var("FOAI_TEST_MODEL")
-                .unwrap_or_else(|_| "qwen3:30b-a3b".to_string()),
+                .unwrap_or_else(|_| "qwen3:14b".to_string()),
             ..AiConfig::default()
         };
 
@@ -1713,7 +2303,7 @@ QUERY: prezzo bitcoin"), Some("prezzo bitcoin".to_string()));
         let runtime = tokio::runtime::Runtime::new().expect("runtime tokio");
         let cfg = AiConfig {
             ollama_model: std::env::var("FOAI_TEST_MODEL")
-                .unwrap_or_else(|_| "qwen3:30b-a3b".to_string()),
+                .unwrap_or_else(|_| "qwen3:14b".to_string()),
             ..AiConfig::default()
         };
 

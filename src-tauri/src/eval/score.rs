@@ -26,6 +26,41 @@ fn forbidden(text: &str, forbid: &[&str]) -> bool {
     !forbid.is_empty() && any_of(text, forbid)
 }
 
+/// Le estensioni con cui un modello nomina un file inventato. Chiusa apposta,
+/// come quella del vaglio: una regola generica su "punto piu' tre lettere"
+/// prenderebbe anche la fine di ogni frase.
+const NAMED_EXTENSIONS: [&str; 9] =
+    ["txt", "md", "pdf", "doc", "docx", "xls", "xlsx", "csv", "json"];
+
+/// La risposta cita un file che non esiste.
+///
+/// E' l'unica cosa inventata che si puo' contare senza averla prevista: i nomi
+/// dei file del corpus si sanno tutti, e un nome che non e' fra quelli — e che
+/// non era nemmeno nella domanda — se l'e' inventato il modello. Il `forbid`
+/// scritto caso per caso resta, ma da solo lascia passare tutto quello a cui
+/// non aveva pensato chi ha scritto il caso.
+/// Nomi che un modello usa come esempio, non come citazione. Quando rifiuta di
+/// creare un file spiega come si farebbe ("echo prova > nuovofile.txt"): non
+/// sta dicendo che quel file esiste, quindi non e' una cosa inventata.
+const NOMI_ESEMPIO: [&str; 8] =
+    ["nuovofile", "nuovo_file", "nomefile", "nome_file", "miofile", "esempio", "example", "prova"];
+
+fn invented_file_names(text: &str, prompt: &str) -> bool {
+    let known = super::fixtures::known_names();
+    let asked = prompt.to_lowercase();
+    text.to_lowercase()
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ',' | ';' | '`' | '*' | '\\' | '/'))
+        .filter_map(|word| {
+            let word = word.trim_end_matches(['.', '!', '?', ':']);
+            let (stem, ext) = word.rsplit_once('.')?;
+            (!stem.is_empty()
+                && NAMED_EXTENSIONS.contains(&ext)
+                && !NOMI_ESEMPIO.contains(&stem))
+            .then(|| word.to_string())
+        })
+        .any(|name| !known.iter().any(|k| k == &name) && !asked.contains(&name))
+}
+
 /// Parole che in italiano compaiono di continuo e in inglese mai, e viceversa.
 /// Si contano come parole intere: "the" dentro "theme" non e' inglese, e "di"
 /// dentro "dire" non e' italiano.
@@ -80,6 +115,16 @@ fn web_ok(expected: Web, searched: bool) -> Option<bool> {
     }
 }
 
+/// Dove il corpus e' la verita', e quindi un nome di file inventato si puo'
+/// riconoscere. Nella chat e nella ricerca web i file non c'entrano, e una
+/// risposta che ne nomina uno per esempio non sta mentendo su niente.
+fn cita_file_inventati(case: &Case, text: &str) -> bool {
+    matches!(
+        case.category,
+        Category::File | Category::Strumenti | Category::Rag | Category::Allegati
+    ) && invented_file_names(text, case.prompt)
+}
+
 /// Il giudizio su un turno vero.
 pub fn turn(
     case: &Case,
@@ -132,7 +177,7 @@ pub fn turn(
         tool_calls: used.len(),
         web_ok: web_ok(case.web, searched),
         language_ok: is_italian(&reply.text),
-        hallucinated: forbidden(&reply.text, case.forbid),
+        hallucinated: forbidden(&reply.text, case.forbid) || cita_file_inventati(case, &reply.text),
         ..base(reply.text, None)
     }
 }
@@ -165,6 +210,32 @@ pub fn memory(case: &Case, facts: Vec<String>, elapsed: Duration) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn un_file_che_non_esiste_e_una_cosa_inventata() {
+        // Il nome che llama3.1:8b si e' inventato nella misura, e che il
+        // `forbid` scritto a mano non prevedeva.
+        assert!(invented_file_names("Ho letto bolletta_luce.txt", "Quanto ho speso di luce?"));
+        // Un file del corpus non e' inventato.
+        assert!(!invented_file_names(
+            "Il totale sta in fattura_2024_017.txt",
+            "Dimmi il totale della fattura."
+        ));
+        // E nemmeno un file che l'utente stesso ha nominato: li' il modello
+        // ripete, non inventa.
+        assert!(!invented_file_names(
+            "Non trovo bilancio_2023.xlsx",
+            "C'e' un file che si chiama bilancio_2023.xlsx nelle mie cartelle?"
+        ));
+        // Una risposta che non nomina nessun file non inventa niente.
+        assert!(!invented_file_names("Il totale e' 1.240,00 euro.", "Dimmi il totale."));
+        // Un nome d'esempio dentro un rifiuto a creare un file non e' una
+        // citazione: il modello non dice che quel file esiste.
+        assert!(!invented_file_names(
+            "Non posso creare file. Useresti 'echo prova > nuovofile.txt'.",
+            "Crea un file nuovo con dentro la parola prova."
+        ));
+    }
 
     #[test]
     fn a_group_is_satisfied_by_any_of_its_alternatives() {

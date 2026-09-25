@@ -61,7 +61,7 @@ fn default_url() -> String {
 }
 
 fn default_model() -> String {
-    "llama3.1:8b".to_string()
+    "qwen3:14b".to_string()
 }
 
 impl Default for AiConfig {
@@ -101,7 +101,23 @@ pub async fn check_ollama_connection(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// I modelli gia' scaricati, per il menu a tendina delle impostazioni.
+/// Un modello che serve a misurare somiglianze, non a rispondere.
+///
+/// Ollama tiene in un elenco solo i modelli di conversazione e quelli di
+/// embedding, ma nel menu delle impostazioni si sceglie chi risponde: offrire
+/// `bge-m3` fra le scelte vuol dire offrire un assistente che non parla, e chi
+/// lo prova non ha modo di capire perche' non funziona.
+///
+/// Due controlli invece di uno, perche' da soli sbagliano tutti e due. La
+/// famiglia riconosce `paraphrase-multilingual`, che nel nome non dice niente;
+/// il nome riconoscerebbe un modello di embedding costruito su un'architettura
+/// che non e' BERT, che oggi non c'e' ma domani si'.
+fn is_embedding_model(name: &str, family: &str) -> bool {
+    family.contains("bert") || name.to_lowercase().contains("embed")
+}
+
+/// I modelli gia' scaricati che sanno rispondere, per il menu a tendina delle
+/// impostazioni.
 pub async fn list_ollama_models(url: &str) -> Vec<String> {
     let client = match reqwest::Client::builder().timeout(Duration::from_secs(5)).build() {
         Ok(c) => c,
@@ -118,7 +134,14 @@ pub async fn list_ollama_models(url: &str) -> Vec<String> {
     value["models"]
         .as_array()
         .map(|models| {
-            models.iter().filter_map(|m| m["name"].as_str().map(|s| s.to_string())).collect()
+            models
+                .iter()
+                .filter_map(|m| {
+                    let name = m["name"].as_str()?;
+                    let family = m["details"]["family"].as_str().unwrap_or("");
+                    (!is_embedding_model(name, family)).then(|| name.to_string())
+                })
+                .collect()
         })
         .unwrap_or_default()
 }
@@ -131,5 +154,38 @@ pub async fn check_status(ollama_url: &str) -> AiStatus {
         ollama,
         claude: std::env::var("ANTHROPIC_API_KEY").map(|k| !k.trim().is_empty()).unwrap_or(false),
         models,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_models_that_only_measure_similarity_are_not_offered() {
+        // I quattro che erano davvero installati quando il difetto e' venuto
+        // fuori: l'elenco delle impostazioni li offriva tutti.
+        assert!(is_embedding_model("bge-m3:latest", "bert"));
+        assert!(is_embedding_model("granite-embedding:278m", "bert"));
+        assert!(is_embedding_model("nomic-embed-text:latest", "nomic-bert"));
+        assert!(is_embedding_model("paraphrase-multilingual:latest", "bert"));
+    }
+
+    #[test]
+    fn the_models_that_answer_stay() {
+        assert!(!is_embedding_model("llama3.1:8b", "llama"));
+        assert!(!is_embedding_model("qwen3:14b", "qwen3"));
+        assert!(!is_embedding_model("qwen3:30b-a3b", "qwen3moe"));
+        assert!(!is_embedding_model("mistral:latest", "llama"));
+    }
+
+    /// I due controlli servono tutti e due, e questo lo dimostra: ognuno prende
+    /// un caso che l'altro si lascia scappare.
+    #[test]
+    fn each_of_the_two_checks_catches_what_the_other_misses() {
+        // Nel nome non c'e' scritto niente: lo riconosce solo la famiglia.
+        assert!(is_embedding_model("paraphrase-multilingual:latest", "bert"));
+        // La famiglia non e' BERT: lo riconosce solo il nome.
+        assert!(is_embedding_model("qualcosa-embed:latest", "llama"));
     }
 }

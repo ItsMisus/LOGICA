@@ -532,6 +532,14 @@ fn main() {
             server_configure,
             server_regenerate_certificate,
         ])
-        .run(tauri::generate_context!())
-        .expect("errore durante l'avvio di LOGICA");
+        .build(tauri::generate_context!())
+        .expect("errore durante l'avvio di LOGICA")
+        // Alla chiusura si restituisce la memoria video: il modello resta
+        // caricato mentre LOGICA e' aperta (vedi `OLLAMA_KEEP_ALIVE`), non
+        // mezz'ora dopo che l'utente ha chiuso la finestra.
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                assistant::release_ollama();
+            }
+        });
 }

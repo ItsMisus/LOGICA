@@ -291,7 +291,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   theme: "dark",
   use_premium_ai: false,
   ollama_url: "http://localhost:11434",
-  ollama_model: "llama3.1:8b",
+  ollama_model: "qwen3:14b",
   web_search: true,
   file_tools: false,
   memory: true,

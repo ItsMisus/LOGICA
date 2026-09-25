@@ -142,10 +142,12 @@ pub const CASES: &[Case] = &[
     Case {
         id: "chat-01",
         prompt: "Qual e' la capitale dell'Australia?",
+        // Basta questo: la risposta sbagliata dice "Sydney" e non "Canberra",
+        // quindi il gruppo la boccia da solo. Un `forbid: ["Sydney"]` invece
+        // bocciava anche la risposta giusta, che Sydney la nomina nel racconto
+        // di come la capitale fu spostata: un falso inventato su una risposta
+        // corretta.
         expect: &[&["Canberra"]],
-        // La capitale sbagliata che dicono tutti: se compare, ha risposto a
-        // memoria senza pensarci.
-        forbid: &["Sydney"],
         tools: Tools::Nessuno,
         web: Web::No,
         ..BASE

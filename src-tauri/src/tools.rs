@@ -179,6 +179,20 @@ pub fn available() -> bool {
     !guard::roots().is_empty()
 }
 
+/// I nomi delle cartelle autorizzate, in minuscolo.
+///
+/// Servono al freno che decide se dichiarare gli strumenti: quando l'utente
+/// nomina una di queste ("cosa c'e' in Documenti?") la richiesta riguarda il
+/// disco anche senza la parola "file". I nomi corti si buttano via: una
+/// cartella che si chiama "AI" comparirebbe dentro mezzo vocabolario.
+pub fn roots_names() -> Vec<String> {
+    guard::roots()
+        .iter()
+        .filter_map(|r| r.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+        .filter(|n| n.chars().count() >= 4)
+        .collect()
+}
+
 /// Il pezzo di prompt che dice al modello dove puo' guardare. Senza l'elenco,
 /// il modello inventa percorsi plausibili e si prende un rifiuto dopo l'altro.
 pub fn roots_block() -> String {
@@ -193,6 +207,392 @@ Nei percorsi scrivi una barra rovesciata sola: C:\\cartella\\file.txt, non C:\\\
 Non puoi scrivere, spostare o cancellare niente: se te lo chiedono, dillo.",
         list.join("\n")
     )
+}
+
+/// Quanti percorsi entrano nell'elenco messo nel prompt. Oltre questo numero
+/// l'elenco costa piu' contesto di quanto valga, e il modello smette di
+/// leggerlo fino in fondo.
+const MAX_TREE_FILES: usize = 120;
+
+/// L'elenco dei file che ci sono davvero nelle cartelle autorizzate.
+///
+/// Il primo anello della catena — trovare il file — e' quello dove i modelli
+/// piccoli si fermano: chiedono `find_files` con la parola sbagliata, non
+/// trovano niente e concludono "non so dove si trova" invece di riprovare.
+/// L'elenco costa una visita del disco e nessuna chiamata al modello, quindi
+/// il primo anello lo fa il programma: al modello resta `read_file` su un
+/// percorso che esiste di sicuro.
+pub fn tree_block() -> String {
+    let roots = guard::roots();
+    if roots.is_empty() {
+        return String::new();
+    }
+    let mut files: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    let mut visited = 0usize;
+    for base in &roots {
+        walk(base, 0, &mut visited, &mut |entry: &Path, is_dir: bool| {
+            if is_dir {
+                return;
+            }
+            total += 1;
+            if files.len() < MAX_TREE_FILES {
+                files.push(display_path(entry));
+            }
+        });
+    }
+    if files.is_empty() {
+        return "I FILE CHE CI SONO\nLe cartelle autorizzate sono vuote: non c'e' niente da aprire, e dirlo e' la risposta giusta.".to_string();
+    }
+    files.sort_by_key(|p| p.to_lowercase());
+    let mut out = String::from(
+        "I FILE CHE CI SONO\nQuesti sono i percorsi veri dei file nelle cartelle autorizzate, letti dal disco adesso:\n",
+    );
+    for row in &files {
+        out.push_str(row);
+        out.push('\n');
+    }
+    if total > files.len() {
+        out.push_str(&format!("... altri {} file non elencati.\n", total - files.len()));
+    }
+    out.push_str(
+        "\nSe il file che serve e' in questo elenco, chiama subito read_file con quel percorso: non cercarlo prima con find_files, e non dire che non sai dove si trova. Se non c'e', puo' essere fra quelli non elencati: cercalo con find_files o search_in_files.",
+    );
+    out
+}
+
+/// Parole che compaiono in ogni domanda e non dicono niente su cosa cercare.
+/// Senza questa lista la ricerca parte da "quanto" e riporta mezza cartella.
+const STOP_WORDS: [&str; 67] = [
+    "quanto", "quanta", "quanti", "quante", "quale", "quali", "cosa", "come", "dove", "chi",
+    "perche", "quando", "dimmi", "dammi", "scrivimi", "trova", "cerca", "apri", "apre", "aprilo",
+    "elenca", "elencami", "sommami", "file", "files", "cartella", "cartelle", "documento",
+    "documenti", "della", "delle", "dello", "degli", "dalla", "dalle", "nella", "nelle", "nello",
+    "negli", "questo", "questa", "quello", "quella", "sono", "essere", "stato", "servono",
+    "serve", "supera", "compare", "ancora", "ultimo", "ultima", "ultime", "ultimi", "volta",
+    "adesso", "oggi", "miei", "mia", "mio", "mie",
+    // Articoli elisi: da "dell'auto" esce "dell", che come sottostringa
+    // combacia con "della"/"delle" in mezzo mondo e falsa il punteggio.
+    "dell", "dall", "sull", "nell", "coll",
+];
+
+/// Quante parole della domanda si portano dietro nella ricerca, e quante
+/// righe si riportano al modello.
+const MAX_HINT_WORDS: usize = 8;
+const MAX_HINT_LINES: usize = 14;
+
+/// Quante finestre al massimo puo' contribuire un singolo file, cosi' che una
+/// domanda su piu' file non venga soffocata dal file che combacia di piu'.
+const MAX_HINT_PER_FILE: usize = 3;
+
+/// Righe raccolte prima di scegliere le migliori. Serve un tetto perche' una
+/// parola comune dentro un recinto grande le trova a migliaia.
+const MAX_HINT_CANDIDATES: usize = 400;
+
+/// Le parole della domanda con cui ha senso cercare, ridotte alla radice.
+///
+/// La radice e' i primi sei caratteri: l'italiano declina, e chi chiede delle
+/// "fatture" ha in un file la parola "fattura". Tagliare corto costa qualche
+/// riga di troppo; non tagliare costa la riga giusta.
+fn hint_words(question: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for raw in question.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+        if raw.chars().count() < 4 || STOP_WORDS.contains(&raw) {
+            continue;
+        }
+        let stem: String = raw.chars().take(6).collect();
+        if !words.contains(&stem) {
+            words.push(stem);
+        }
+        if words.len() >= MAX_HINT_WORDS {
+            break;
+        }
+    }
+    words
+}
+
+/// Cosa e' stato cercato, da mostrare accanto alla risposta: le stesse parole
+/// che ha usato la ricerca, non una parafrasi.
+pub fn hint_summary(question: &str) -> String {
+    hint_words(question).join(", ")
+}
+
+/// Le righe dei file dell'utente che parlano di quello che ha chiesto.
+///
+/// E' `search_in_files` fatto dal programma invece che dal modello, e per
+/// tutte le parole della domanda in una passata sola. Serve al secondo anello
+/// della catena, quello dove i modelli piccoli si fermano: aprono un file, non
+/// trovano dentro tutto quello che serve e concludono "non ho trovato" invece
+/// di aprire il secondo. Qui le righe dei due file ci sono gia' tutte e due.
+///
+/// Le righe sono isolate apposta: chi legge deve poter decidere se gli basta
+/// o se il file va aperto davvero.
+///
+/// Una riga del prefetch: `file:numero: testo`, col testo tagliato perche' una
+/// riga lunghissima non mangi il posto delle altre.
+/// La domanda chiede una cifra? Solo allora si portano su le righe con un
+/// importo dai file gia' promossi: per "di che colore sono le finestre" un
+/// prezzo non c'entra niente.
+fn wants_amount(question: &str) -> bool {
+    const SEGNI: [&str; 12] = [
+        "spes", "cost", "somma", "paga", "prezz", "total", "euro", "import", "canone", "tariff",
+        "budget", "quant",
+    ];
+    let low = question.to_lowercase();
+    SEGNI.iter().any(|s| low.contains(s)) || question.contains('\u{20ac}')
+}
+
+/// Una riga che porta un importo: una cifra accanto a "euro" o al simbolo. Non
+/// una data e non un numero qualsiasi - "4 marzo 2027" non e' un costo.
+fn is_money_line(line: &str) -> bool {
+    let low = line.to_lowercase();
+    if !low.contains("euro") && !line.contains('\u{20ac}') {
+        return false;
+    }
+    line.chars().any(|c| c.is_ascii_digit())
+}
+
+fn row_at(entry: &Path, line_index: usize, line: &str) -> String {
+    format!(
+        "{}:{}: {}",
+        display_path(entry),
+        line_index + 1,
+        line.trim().chars().take(200).collect::<String>()
+    )
+}
+
+pub fn hints_block(question: &str) -> String {
+    let words = hint_words(question);
+    if words.is_empty() {
+        return String::new();
+    }
+    let roots = guard::roots();
+    if roots.is_empty() {
+        return String::new();
+    }
+
+    // Riga, e quante parole diverse della domanda contiene: una riga che le
+    // contiene tutte e due vale piu' di due righe che ne contengono una.
+    //
+    // Si raccoglie molto piu' di quanto se ne terra': il tetto vero e' quello
+    // sulle righe riportate, e tagliare gia' qui vorrebbe dire scegliere le
+    // prime incontrate invece delle migliori.
+    // Ogni riga che c'entra si porta dietro una piccola finestra: se stessa e
+    // fino a due righe non vuote subito sotto. Il numero che risponde alla
+    // domanda quasi mai sta sulla riga con la parola chiave ("manutenzione
+    // della caldaia") ma su quella dopo ("Costo: 118 euro"): senza la finestra
+    // il modello vede il nome della cosa e non la sua cifra, e va ad aprire il
+    // file per una cosa che gli avremmo gia' potuto dare.
+    // Quando la domanda chiede una cifra, in un file che c'entra la cifra e'
+    // quasi sempre la risposta - ma puo' stare lontana dalla parola chiave
+    // ("Costo: 118 euro" otto righe sotto "manutenzione della caldaia"), fuori
+    // dalla finestra. Allora, nei soli file che hanno gia' una trovata, si
+    // portano su anche le righe che contengono un importo.
+    let money = wants_amount(question);
+    let mut hits: Vec<(usize, String, Vec<String>)> = Vec::new();
+    let mut visited = 0usize;
+    for base in &roots {
+        walk(base, 0, &mut visited, &mut |entry: &Path, is_dir: bool| {
+            if is_dir || hits.len() >= MAX_HINT_CANDIDATES {
+                return;
+            }
+            let Ok(meta) = entry.metadata() else { return };
+            if meta.len() > MAX_SCAN_BYTES {
+                return;
+            }
+            let Ok(content) = std::fs::read(entry) else { return };
+            if content.iter().take(1024).any(|b| *b == 0) {
+                return;
+            }
+            let text = String::from_utf8_lossy(&content);
+            let lines: Vec<&str> = text.lines().collect();
+            let file = display_path(entry);
+            let mut file_hits: Vec<(usize, Vec<String>)> = Vec::new();
+            for n in 0..lines.len() {
+                let lower = lines[n].to_lowercase();
+                let score = words.iter().filter(|w| lower.contains(w.as_str())).count();
+                if score == 0 {
+                    continue;
+                }
+                let mut window = vec![row_at(entry, n, lines[n])];
+                let mut added = 0;
+                for l in lines.iter().skip(n + 1) {
+                    if added == 2 {
+                        break;
+                    }
+                    if l.trim().is_empty() {
+                        continue;
+                    }
+                    // La riga seguente conta come contorno solo se non e' gia'
+                    // una sua trovata: due parole chiave attaccate restano due
+                    // finestre distinte, non una che mangia l'altra.
+                    if words.iter().any(|w| l.to_lowercase().contains(w.as_str())) {
+                        break;
+                    }
+                    added += 1;
+                    window.push(row_at(entry, n + added, l));
+                }
+                file_hits.push((score, window));
+            }
+            if file_hits.is_empty() {
+                return;
+            }
+            // Solo ora, a file gia' promosso: le sue righe con un importo.
+            if money {
+                for (n, l) in lines.iter().enumerate() {
+                    if is_money_line(l) {
+                        file_hits.push((1, vec![row_at(entry, n, l)]));
+                    }
+                }
+            }
+            for (score, window) in file_hits {
+                hits.push((score, file.clone(), window));
+            }
+        });
+    }
+
+    if hits.is_empty() {
+        return String::new();
+    }
+    // Le righe che parlano di piu' cose della domanda per prime: quando il
+    // tetto taglia, taglia quelle che c'entrano di meno.
+    hits.sort_by_key(|a| std::cmp::Reverse(a.0));
+
+    // Il tetto e' anche per file, non solo complessivo. Una domanda che chiede
+    // tre cose da tre file ("tagliando, caldaia, alloggio") va persa se un
+    // solo file, con piu' righe che combaciano, si prende tutti i posti: il
+    // modello riceve due cifre su tre e si ferma a chiedere la terza. Con un
+    // tetto per file ognuno dei tre entra.
+    let mut per_file: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut kept: Vec<&Vec<String>> = Vec::new();
+    for (_, file, window) in &hits {
+        if kept.len() >= MAX_HINT_LINES {
+            break;
+        }
+        let count = per_file.entry(file.as_str()).or_insert(0);
+        if *count >= MAX_HINT_PER_FILE {
+            continue;
+        }
+        *count += 1;
+        kept.push(window);
+    }
+
+    let mut out = String::from(
+        "RIGHE CHE PARLANO DELLA DOMANDA\nLe ha cercate l'app nei file dell'utente, prima di passarti la domanda:\n",
+    );
+    // Una riga di contorno di una finestra puo' essere la riga chiave di
+    // un'altra: si stampa una volta sola, cosi' il conteggio non inganna.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for window in &kept {
+        for row in window.iter() {
+            if seen.insert(row.as_str()) {
+                out.push_str(row);
+                out.push('\n');
+            }
+        }
+    }
+    out.push_str(
+        "\nSono righe staccate dal loro file: se bastano, rispondi con queste e cita il file. Se la domanda chiede piu' cose e qui c'e' solo una parte, apri con read_file gli altri file che possono contenere il resto prima di rispondere. Non dire che non hai trovato niente finche' non li hai aperti.",
+    );
+    out
+}
+
+/// Gli strumenti che esistono davvero. Serve a distinguere una chiamata
+/// scritta a mano da un modello che si e' inventato lo strumento: `llama3.1:8b`
+/// produce `{"name": "math", ...}`, e `math` non e' mai esistito.
+pub fn exists(name: &str) -> bool {
+    definitions().iter().any(|d| d["name"].as_str() == Some(name))
+}
+
+/// Legge il JSON di una chiamata scritta a mano, anche quando le barre dei
+/// percorsi Windows non sono raddoppiate.
+///
+/// `llama3.1:8b` scrive tutte e due le forme. In `web-06` esce
+/// `"C:\Users\franc"`, giusto; in `chat-07` esce `"C:\Users\franc"`, che JSON
+/// non e': `\U` non e' una sequenza di escape valida. Rifiutare la seconda
+/// forma vorrebbe dire lasciar passare a schermo proprio le chiamate che
+/// questo modulo esiste per fermare — chat-07, chat-14 e chat-20 sono tutte
+/// cosi'.
+///
+/// Quindi due passate. La prima e' quella stretta, e vince sempre quando il
+/// testo e' JSON valido: un `\n` scritto apposta resta un a capo. Solo se
+/// fallisce si riprova considerando ogni barra solitaria come una barra vera.
+/// La barra davanti a una virgoletta o a un'altra barra si lascia com'e':
+/// raddoppiarla chiuderebbe la stringa nel punto sbagliato.
+fn leggi(testo: &str) -> Option<serde_json::Value> {
+    if let Ok(valore) = serde_json::from_str(testo) {
+        return Some(valore);
+    }
+    serde_json::from_str(&barre_letterali(testo)).ok()
+}
+
+fn barre_letterali(testo: &str) -> String {
+    let mut fuori = String::with_capacity(testo.len() + 16);
+    let mut dentro_stringa = false;
+    let mut resto = testo.chars().peekable();
+    while let Some(c) = resto.next() {
+        match c {
+            '"' => {
+                dentro_stringa = !dentro_stringa;
+                fuori.push(c);
+            }
+            '\\' if dentro_stringa => match resto.peek() {
+                // Gia' a posto, o una virgoletta protetta: si copiano tutte e
+                // due e non si tocca niente.
+                Some('\\') | Some('"') => {
+                    fuori.push(c);
+                    fuori.push(resto.next().unwrap());
+                }
+                _ => fuori.push_str("\\\\"),
+            },
+            _ => fuori.push(c),
+        }
+    }
+    fuori
+}
+
+/// Una chiamata a uno strumento che il modello ha scritto nel testo invece di
+/// mandarla nel campo apposta.
+///
+/// Non e' un caso raro da manuale: nella misura delle cento richieste,
+/// `llama3.1:8b` l'ha fatto quattro volte solo fra le domande di chiacchiera, e
+/// il risultato finiva stampato in chat cosi' com'era — `{"name": "read_file",
+/// "parameters": {...}}` al posto di una risposta. Riconoscerla serve a due
+/// cose: eseguirla quando nomina uno strumento vero, e comunque non mostrarla
+/// mai all'utente.
+///
+/// I nomi del contenitore degli argomenti sono tre perche' tre se ne vedono:
+/// `parameters` e' quello che scrive llama, `arguments` quello del formato
+/// vero di Ollama, `input` quello di Claude.
+pub fn handwritten_call(text: &str) -> Option<ToolCall> {
+    let mut clean = text.trim();
+    // Qualche modello la incornicia come blocco di codice.
+    if let Some(rest) = clean.strip_prefix("```") {
+        let rest = rest.strip_prefix("json").unwrap_or(rest);
+        clean = rest.trim().trim_end_matches("```").trim();
+    }
+
+    let value: serde_json::Value = leggi(clean)?;
+    // Con o senza l'involucro `function` del formato di Ollama.
+    let body = if value.get("function").is_some() { &value["function"] } else { &value };
+
+    let name = body["name"].as_str()?;
+    if !exists(name) {
+        return None;
+    }
+
+    let input = ["parameters", "arguments", "input"]
+        .iter()
+        .find_map(|k| match &body[*k] {
+            // Gli argomenti a volte sono una stringa da riaprire, come nel
+            // formato vero.
+            serde_json::Value::String(t) => leggi(t),
+            v @ serde_json::Value::Object(_) => Some(v.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Some(ToolCall { id: String::new(), name: name.to_string(), input })
 }
 
 /* -------------------------------- esecuzione ------------------------------ */
@@ -552,6 +952,102 @@ impl ToolUse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dalla_domanda_restano_solo_le_parole_che_cercano_qualcosa() {
+        // Le parole che stanno in ogni domanda non devono cercare niente.
+        assert_eq!(hint_words("Quanto ho speso per l'alloggio a Lisbona?"), ["speso", "allogg", "lisbon"]);
+        // La radice di sei caratteri fa incontrare il singolare col plurale:
+        // chi chiede delle "fatture" ha in casa una "fattura".
+        assert!(hint_words("Quale delle mie fatture supera i mille euro?").contains(&"fattur".to_string()));
+        // Una domanda che non nomina niente non fa partire nessuna ricerca.
+        assert!(hint_words("Quanto fa 17 per 23?").is_empty());
+    }
+
+    /// Le quattro che `llama3.1:8b` ha davvero prodotto nella misura, copiate
+    /// dal giornale. Due nominano uno strumento vero, due no.
+    #[test]
+    fn a_call_written_in_the_text_is_recognised() {
+        let c = handwritten_call(
+            r#"{"name": "read_file", "parameters": {"path": "C:\Temp\acqua.txt"}}"#,
+        )
+        .expect("read_file non riconosciuta");
+        assert_eq!(c.name, "read_file");
+        assert_eq!(c.arg("path").as_deref(), Some(r"C:\Temp\acqua.txt".to_string()).as_deref());
+
+        let c = handwritten_call(
+            r#"{"name": "search_in_files", "parameters": {"path": "C:\Temp", "text": "effimero"}}"#,
+        )
+        .expect("search_in_files non riconosciuta");
+        assert_eq!(c.name, "search_in_files");
+        assert_eq!(c.arg("text").as_deref(), Some("effimero"));
+    }
+
+    /// Il caso che conta di piu': lo strumento non esiste. Eseguirlo non si
+    /// puo', e far finta che sia una chiamata vera lascerebbe l'utente senza
+    /// risposta a "quanto fa 17 per 23".
+    #[test]
+    fn an_invented_tool_is_not_a_call() {
+        assert!(handwritten_call(r#"{"name": "math", "parameters": {"a": "17", "b": "23"}}"#)
+            .is_none());
+        assert!(handwritten_call(r#"{"name": "send_email", "parameters": {}}"#).is_none());
+    }
+
+    #[test]
+    fn the_three_shapes_of_arguments_all_arrive() {
+        // `parameters`: quello che scrive llama.
+        assert!(handwritten_call(r#"{"name":"list_dir","parameters":{"path":"C:\x"}}"#).is_some());
+        // `arguments` come stringa da riaprire: il formato vero di Ollama.
+        let c = handwritten_call(r#"{"name":"list_dir","arguments":"{\"path\":\"C:\\x\"}"}"#)
+            .expect("arguments come stringa");
+        assert_eq!(c.arg("path").as_deref(), Some(r"C:\x".to_string()).as_deref());
+        // `input`: il formato di Claude, dentro l'involucro `function`.
+        assert!(handwritten_call(r#"{"function":{"name":"list_dir","input":{"path":"C:\x"}}}"#)
+            .is_some());
+    }
+
+    /// Le due forme che llama produce davvero per lo stesso percorso. Quella
+    /// con la barra singola non e' JSON valido, ma e' quella che esce piu'
+    /// spesso: se non la si legge, la chiamata finisce stampata a schermo.
+    #[test]
+    fn a_windows_path_is_read_in_both_forms() {
+        let singola = handwritten_call(
+            r#"{"name": "read_file", "parameters": {"path": "C:\Users\franc\nota.txt"}}"#,
+        )
+        .expect("barra singola, la forma di chat-07");
+        let doppia = handwritten_call(
+            r#"{"name": "read_file", "parameters": {"path": "C:\\Users\\franc\\nota.txt"}}"#,
+        )
+        .expect("barra doppia, la forma di web-06");
+        assert_eq!(singola.arg("path"), doppia.arg("path"));
+        assert_eq!(singola.arg("path").as_deref(), Some(r"C:\Users\franc\nota.txt"));
+    }
+
+    #[test]
+    fn a_call_inside_a_code_fence_is_still_a_call() {
+        let c = handwritten_call("```json\n{\"name\": \"list_dir\", \"parameters\": {\"path\": \"C:\\x\"}}\n```")
+            .expect("dentro il blocco di codice");
+        assert_eq!(c.name, "list_dir");
+    }
+
+    /// Una risposta normale non deve mai essere scambiata per una chiamata.
+    #[test]
+    fn ordinary_prose_is_left_alone() {
+        assert!(handwritten_call("Fa 391.").is_none());
+        assert!(handwritten_call("Nel file c'e' scritto {\"a\": 1}, cioe' un oggetto.").is_none());
+        assert!(handwritten_call("").is_none());
+        assert!(handwritten_call("{}").is_none());
+    }
+
+    #[test]
+    fn only_the_tools_that_exist_are_known() {
+        assert!(exists("list_dir"));
+        assert!(exists("read_file"));
+        assert!(exists("find_files"));
+        assert!(exists("search_in_files"));
+        assert!(!exists("math"));
+        assert!(!exists("write_file"));
+    }
 
     #[test]
     fn ollama_tools_wrap_the_same_schema() {

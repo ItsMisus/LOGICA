@@ -10,7 +10,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use super::cases::Category;
+use super::cases::{Category, CASES};
 use super::Outcome;
 
 /// I conti di un gruppo di richieste.
@@ -166,6 +166,10 @@ pub fn write(everything: &[(String, Vec<Outcome>)]) -> String {
             all.median().as_secs_f32()
         );
 
+        if let Some(riga) = memory_split(outcomes) {
+            let _ = writeln!(out, "\n{riga}");
+        }
+
         let _ = writeln!(
             out,
             "\nChiamate agli strumenti in tutto: {}. Richiesta piu' lenta: {:.1}s.",
@@ -180,6 +184,39 @@ pub fn write(everything: &[(String, Vec<Outcome>)]) -> String {
 
     out.push_str(&fallen(everything));
     out
+}
+
+/// La memoria fa due mestieri opposti, e un numero solo li mescola.
+///
+/// "6 su 15" puo' voler dire che ha imparato quasi meta' delle cose, oppure
+/// che non ne ha imparata nessuna e in compenso non si e' inventato niente
+/// dove non c'era niente da imparare. Sono due esiti lontanissimi, e la
+/// riparazione da fare e' diversa: nel primo caso si aggiusta l'estrattore,
+/// nel secondo si e' gia' a posto meta' del lavoro. Quindi si contano
+/// separati, ricavando dal dataset quali casi avevano qualcosa da ricordare:
+/// cosi' anche un giornale scritto prima di questa riga si legge nel modo
+/// nuovo.
+fn memory_split(outcomes: &[Outcome]) -> Option<String> {
+    let da_ricordare = |o: &Outcome| {
+        CASES.iter().find(|c| c.id == o.id).is_some_and(|c| !c.expect.is_empty())
+    };
+    let (ricorda, scarta): (Vec<&Outcome>, Vec<&Outcome>) = outcomes
+        .iter()
+        .filter(|o| o.category == Category::Memoria)
+        .partition(|o| da_ricordare(o));
+    if ricorda.is_empty() && scarta.is_empty() {
+        return None;
+    }
+
+    let giusti = |group: &[&Outcome]| group.iter().filter(|o| o.correct).count();
+    Some(format!(
+        "Memoria, i due mestieri contati separati: **ricorda** {} dei fatti che c'erano da \
+         ricordare, **non si inventa niente** in {} degli scambi dove non c'era niente da \
+         imparare. Un numero solo li mescolerebbe, e non si capirebbe piu' quale dei due e' \
+         rotto.",
+        share(giusti(&ricorda), ricorda.len()),
+        share(giusti(&scarta), scarta.len())
+    ))
 }
 
 /// Il confronto fra modelli, categoria per categoria. La domanda a cui deve
