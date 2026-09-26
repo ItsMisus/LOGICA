@@ -514,11 +514,29 @@ async fn command(
 /// Senza questo, il corpo della richiesta potrebbe indicare un `ollama_url`
 /// qualsiasi: LOGICA spedirebbe li' la conversazione e i nomi dei file,
 /// trasformando una sessione valida in una fuga di dati.
-fn local_ai(mut config: AiConfig) -> AiConfig {
-    let prefs = crate::storage::load_preferences();
-    config.ollama_url = prefs.ollama_url;
+fn local_ai(config: AiConfig) -> AiConfig {
+    within_preferences(config, &crate::storage::load_preferences())
+}
+
+/// Tutto cio' che apre una porta sui dati o verso l'esterno si decide dal PC.
+///
+/// `keep_engine_settings` impedisce di accendere questi permessi cambiando le
+/// preferenze; qui si chiude l'altra strada, quella della singola richiesta:
+/// senza, bastava mandare `file_tools: true` dentro `talk` per far leggere i
+/// file al modello, o `use_premium_ai: true` per spedire la conversazione
+/// all'API di Anthropic da un PC che usa solo Ollama.
+///
+/// Da browser un permesso si puo' spegnere, mai accendere: la scelta per
+/// singola chat fra Claude e Ollama resta, ma solo se Claude e' gia' acceso
+/// sul PC.
+fn within_preferences(mut config: AiConfig, prefs: &Preferences) -> AiConfig {
+    config.ollama_url = prefs.ollama_url.clone();
     // Anche l'accesso a internet si decide dal PC: da browser non lo si accende.
     config.web_search = prefs.web_search;
+    config.file_tools &= prefs.file_tools;
+    config.documents &= prefs.documents;
+    config.use_premium_ai &= prefs.use_premium_ai;
+    config.memory &= prefs.memory;
     config
 }
 
@@ -654,6 +672,59 @@ mod tests {
         let h = headers(&[("cookie", "tema=scuro; logica_session=abc123; altro=1")]);
         assert_eq!(cookie_value(&h, COOKIE).as_deref(), Some("abc123"));
         assert_eq!(cookie_value(&h, "assente"), None);
+    }
+
+    /// La richiesta chiede tutto acceso, il PC ha tutto spento: vince il PC.
+    #[test]
+    fn da_remoto_i_permessi_non_si_accendono() {
+        let prefs = Preferences {
+            use_premium_ai: false,
+            web_search: false,
+            file_tools: false,
+            memory: false,
+            documents: false,
+            ..Preferences::default()
+        };
+        let chiesta = AiConfig {
+            use_premium_ai: true,
+            ollama_url: "http://altrove.example:11434".to_string(),
+            web_search: true,
+            file_tools: true,
+            memory: true,
+            documents: true,
+            ..AiConfig::default()
+        };
+
+        let usata = within_preferences(chiesta, &prefs);
+        assert!(!usata.use_premium_ai);
+        assert!(!usata.web_search);
+        assert!(!usata.file_tools);
+        assert!(!usata.memory);
+        assert!(!usata.documents);
+        assert_eq!(usata.ollama_url, prefs.ollama_url);
+    }
+
+    /// Spegnere da browser resta possibile: e' la scelta di Ollama per una
+    /// singola chat quando sul PC e' acceso Claude.
+    #[test]
+    fn da_remoto_i_permessi_si_possono_spegnere() {
+        let prefs = Preferences {
+            use_premium_ai: true,
+            file_tools: true,
+            documents: true,
+            ..Preferences::default()
+        };
+        let chiesta = AiConfig {
+            use_premium_ai: false,
+            file_tools: false,
+            documents: false,
+            ..AiConfig::default()
+        };
+
+        let usata = within_preferences(chiesta, &prefs);
+        assert!(!usata.use_premium_ai);
+        assert!(!usata.file_tools);
+        assert!(!usata.documents);
     }
 
     #[test]

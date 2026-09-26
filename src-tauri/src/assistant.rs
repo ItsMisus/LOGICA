@@ -129,6 +129,16 @@ const CHAT_TEMPERATURE: f32 = 0.7;
 /// stessa decisione, altrimenti l'app cerca a volte si' e a volte no.
 const SERVICE_TEMPERATURE: f32 = 0.0;
 
+/// Con Claude la temperatura non esiste: `claude-opus-5` rifiuta
+/// `temperature`, `top_p` e `top_k` con un 400. La leva al loro posto e'
+/// l'effort: medio per la risposta vera, basso per i passi di servizio, dove
+/// conta decidere in fretta e sempre allo stesso modo.
+const CHAT_EFFORT: &str = "medium";
+const SERVICE_EFFORT: &str = "low";
+
+/// Token di risposta concessi a Claude. 4096 troncava le risposte lunghe.
+const CLAUDE_MAX_TOKENS: u32 = 16_000;
+
 /// Pagine aperte per ogni ricerca. Due bastano quasi sempre e tengono
 /// l'attesa prima della risposta a pochi secondi.
 const PAGES_PER_SEARCH: usize = 2;
@@ -723,10 +733,37 @@ fn missing_model_hint(status: reqwest::StatusCode, detail: &str, model: &str) ->
     }
 }
 
+/// Il corpo della richiesta a Claude, separato dall'invio per poterlo provare.
+///
+/// Il pensiero e' spento esplicitamente: su `claude-opus-5` e' acceso di
+/// default, e questo client non conserva i blocchi `thinking` (vedi
+/// `claude_chunk`), che nel giro degli strumenti andrebbero rimandati
+/// indietro invariati. `disabled` e' ammesso solo con effort fino a `high`.
+fn claude_body(
+    system: &str,
+    messages: &[serde_json::Value],
+    effort: &str,
+    tools: Option<&[serde_json::Value]>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": ai::CLAUDE_MODEL,
+        "max_tokens": CLAUDE_MAX_TOKENS,
+        "system": system,
+        "messages": messages,
+        "thinking": { "type": "disabled" },
+        "output_config": { "effort": effort },
+        "stream": true
+    });
+    if let Some(tools) = tools {
+        body["tools"] = serde_json::json!(tools);
+    }
+    body
+}
+
 async fn stream_claude(
     system: &str,
     messages: &[serde_json::Value],
-    temperature: f32,
+    effort: &str,
     tools: Option<&[serde_json::Value]>,
     cancel: &AtomicBool,
     on_delta: &mut impl FnMut(&str),
@@ -734,17 +771,7 @@ async fn stream_claude(
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "ANTHROPIC_API_KEY non impostata: imposta la chiave oppure usa Ollama.".to_string())?;
 
-    let mut body = serde_json::json!({
-        "model": ai::CLAUDE_MODEL,
-        "max_tokens": 4096,
-        "system": system,
-        "messages": messages,
-        "temperature": temperature,
-        "stream": true
-    });
-    if let Some(tools) = tools {
-        body["tools"] = serde_json::json!(tools);
-    }
+    let body = claude_body(system, messages, effort, tools);
 
     let client = reqwest::Client::builder()
         .timeout(STREAM_TIMEOUT)
@@ -779,7 +806,7 @@ async fn ask(system: &str, prompt: &str, cfg: &AiConfig) -> Option<String> {
     let cancel = AtomicBool::new(false);
     let mut sink = |_: &str| {};
     let reply = if cfg.use_premium_ai {
-        stream_claude(system, &messages, SERVICE_TEMPERATURE, None, &cancel, &mut sink).await
+        stream_claude(system, &messages, SERVICE_EFFORT, None, &cancel, &mut sink).await
     } else {
         stream_ollama(cfg, system, &messages, SERVICE_TEMPERATURE, None, false, &cancel, &mut sink)
             .await
@@ -1435,7 +1462,7 @@ async fn run_turn(
     };
 
     let attempt = if cfg.use_premium_ai {
-        stream_claude(system, messages, CHAT_TEMPERATURE, declared.as_deref(), cancel, on_delta).await
+        stream_claude(system, messages, CHAT_EFFORT, declared.as_deref(), cancel, on_delta).await
     } else {
         stream_ollama(cfg, system, messages, CHAT_TEMPERATURE, declared.as_deref(), true, cancel, on_delta)
             .await
@@ -1445,7 +1472,7 @@ async fn run_turn(
         Err(e) if declared.is_some() => {
             eprintln!("[logica] strumenti sui file rifiutati dal motore, riprovo senza: {e}");
             if cfg.use_premium_ai {
-                stream_claude(system, messages, CHAT_TEMPERATURE, None, cancel, on_delta).await
+                stream_claude(system, messages, CHAT_EFFORT, None, cancel, on_delta).await
             } else {
                 stream_ollama(cfg, system, messages, CHAT_TEMPERATURE, None, true, cancel, on_delta)
                     .await
@@ -1653,6 +1680,23 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `claude-opus-5` risponde 400 a una richiesta con `temperature`: e' il
+    /// difetto che rendeva inutilizzabile tutta la modalita' Claude, e nessun
+    /// test offline lo vedeva.
+    #[test]
+    fn claude_requests_carry_no_sampling_parameters() {
+        let messages = vec![serde_json::json!({ "role": "user", "content": "ciao" })];
+        let body = claude_body("sistema", &messages, CHAT_EFFORT, None);
+
+        for removed in ["temperature", "top_p", "top_k"] {
+            assert!(body.get(removed).is_none(), "{removed} non deve esserci");
+        }
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert_eq!(body["output_config"]["effort"], "medium");
+        assert_eq!(body["max_tokens"], CLAUDE_MAX_TOKENS);
+        assert!(body.get("tools").is_none());
+    }
 
     #[test]
     fn ollama_lines_become_text_and_end() {
